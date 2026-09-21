@@ -60,8 +60,9 @@ export function Dashboard() {
         }>("get_dns_status");
         setDnsStatus(dns as never);
 
-        // Check if already connected (DNS is set to relay)
-        if (dns.configured && dns.current_dns) {
+        // Only mark "connected" if DNS is set to the relay IP specifically
+        const relayIp = info.ip || info.seen_ip;
+        if (relayIp && dns.configured && dns.current_dns === relayIp) {
           setConnectionStatus("connected");
         }
       } catch (e) {
