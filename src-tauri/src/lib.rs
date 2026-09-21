@@ -10,7 +10,6 @@ use tauri::{
 };
 use types::{DnsStatus, LoginResponse, PlansResponse, SimpleResponse, UserInfo};
 
-/// Tracks connection state and session info.
 struct AppState {
     connected: Mutex<bool>,
     session: Mutex<Option<String>>,
@@ -169,18 +168,26 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Log panics to file for debugging
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!("PANIC: {}\n", info);
+        let _ = std::fs::write("PeDitXCDN-crash.log", &msg);
+    }));
+
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .manage(AppState {
             connected: Mutex::new(false),
             session: Mutex::new(None),
             panel_url: Mutex::new(None),
         })
         .setup(|app| {
-            create_tray(app.handle())?;
+            // Create tray - non-fatal if it fails
+            if let Err(e) = create_tray(app.handle()) {
+                eprintln!("Warning: tray icon failed: {e}");
+            }
+
+            // Hide to tray on close instead of quitting
             if let Some(win) = app.get_webview_window("main") {
                 win.on_window_event(|event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
