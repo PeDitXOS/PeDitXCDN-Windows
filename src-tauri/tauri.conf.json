@@ -5,7 +5,7 @@
   "identifier": "ir.peditx.cdn",
   "build": {
     "beforeDevCommand": "",
-    "devUrl": "http://localhost:5173",
+    "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "",
     "frontendDist": "../dist"
   },
@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' https: http://127.0.0.1:*; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:"
+      "csp": "default-src 'self'; connect-src 'self' https: http://127.0.0.1:*; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https://fonts.gstatic.com"
     },
     "trayIcon": {
       "iconPath": "icons/icon.png",

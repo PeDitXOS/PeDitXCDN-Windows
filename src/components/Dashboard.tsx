@@ -88,9 +88,8 @@ export function Dashboard() {
       <header className="flex items-center justify-between px-5 py-3 shrink-0"
               style={{ borderBottom: "1px solid var(--border)" }}>
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center"
-               style={{ background: "linear-gradient(135deg, var(--p), var(--p2))" }}>
-            <span className="text-xs font-black" style={{ color: "var(--bg)" }}>PX</span>
+          <div className="w-8 h-8 rounded-lg overflow-hidden">
+            <img src="/logo.png" alt="PeDitXCDN" className="w-full h-full object-cover" />
           </div>
           <div>
             <h1 className="text-sm font-bold" style={{ color: "var(--p)" }}>PeDitXCDN</h1>
@@ -195,7 +194,7 @@ export function Dashboard() {
       <div className="shrink-0 text-center py-2"
            style={{ borderTop: "1px solid var(--border)" }}>
         <span className="text-[10px]" style={{ color: "var(--muted)" }}>
-          PeDitXCDN v0.2.0
+          PeDitXCDN v0.2.3
         </span>
       </div>
     </div>

@@ -61,12 +61,11 @@ export function LoginScreen() {
       <div className="w-full max-w-sm space-y-6 relative z-10">
         {/* Logo */}
         <div className="text-center space-y-3">
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl"
+          <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl overflow-hidden"
                style={{
-                 background: "linear-gradient(135deg, var(--p), var(--p2))",
                  boxShadow: "0 8px 32px rgba(0,212,170,0.3)",
                }}>
-            <span className="text-3xl font-black" style={{ color: "var(--bg)" }}>PX</span>
+            <img src="/logo.png" alt="PeDitXCDN" className="w-full h-full object-cover" />
           </div>
           <div>
             <h1 className="text-2xl font-bold" style={{ color: "var(--text)" }}>PeDitXCDN</h1>
