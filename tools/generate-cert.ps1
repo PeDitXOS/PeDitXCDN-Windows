@@ -1,8 +1,10 @@
-# PeDitXCDN Code Signing Certificate Generator
-# Run this on Windows PowerShell (Admin)
+# PeDitXCDN - Generate + Auto-install Certificate
+# Run this ONCE on your build machine
 
 $certName = "PeDitXCDN Code Signing"
-$outputPath = "$PSScriptRoot\certificate.pfx"
+$toolsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$pfxPath = Join-Path $toolsDir "certificate.pfx"
+$cerPath = Join-Path $toolsDir "certificate.cer"
 
 # Generate self-signed certificate
 $cert = New-SelfSignedCertificate `
@@ -15,25 +17,12 @@ $cert = New-SelfSignedCertificate `
     -KeyExportPolicy Exportable `
     -NotAfter (Get-Date).AddYears(3)
 
-# Export to PFX (without password for simplicity)
-$pfxPassword = ConvertTo-SecureString -String "" -Force -AsPlainText
-Export-PfxCertificate `
-    -Cert $cert `
-    -FilePath $outputPath `
-    -Password $pfxPassword
+# Export PFX (for signing in CI)
+Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password (New-Object Security.SecureString)
 
-# Convert to Base64 for GitHub Secrets
-$certBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($outputPath))
+# Export CER (for embedding in installer)
+Export-Certificate -Cert $cert -FilePath $cerPath -Type CERT
 
-Write-Host "========================================" -ForegroundColor Green
-Write-Host "Certificate created successfully!" -ForegroundColor Green
-Write-Host "========================================" -ForegroundColor Green
-Write-Host ""
-Write-Host "Certificate Thumbprint: $($cert.Thumbprint)" -ForegroundColor Yellow
-Write-Host "PFX File: $outputPath" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "For GitHub Actions, add this secret:" -ForegroundColor Cyan
-Write-Host "  CERTIFICATE_BASE64 = (contents of certificate.pfx as base64)" -ForegroundColor White
-Write-Host ""
-Write-Host "To sign on your machine:" -ForegroundColor Cyan
-Write-Host '  signtool sign /f certificate.pfx /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 file.exe' -ForegroundColor White
+Write-Host "Done! Files created:" -ForegroundColor Green
+Write-Host "  $pfxPath (for CI signing)"
+Write-Host "  $cerPath (for installer)"
