@@ -1,0 +1,84 @@
+========================================
+  PeDitXCDN - Code Signing Certificate
+========================================
+
+مراحل (فقط یه بار انجام بده):
+
+1. ویندوز رو روشن کن
+
+2. PowerShell رو به عنوان Administrator باز کن
+   (روی Start راست کلیک → Windows Terminal (Admin))
+
+3. دستورات زیر رو مرحله به مرحله اجرا کن:
+
+
+مرحله ۱: برو به پوشه tools
+------------------------------
+cd C:\Users\<نام کاربرت>\PeDitXCDN-Windows\tools
+
+(یا هر جایی که پروژه رو clone کردی)
+
+
+مرحله ۲: certificate بساز
+------------------------------
+پاورشل اسکریپت زیر رو اجرا کن:
+
+$cert = New-SelfSignedCertificate `
+    -Type CodeSigningCert `
+    -Subject "CN=PeDitXCDN Code Signing" `
+    -CertStoreLocation "Cert:\CurrentUser\My" `
+    -KeyUsage DigitalSignature `
+    -KeyAlgorithm RSA `
+    -KeyLength 2048 `
+    -KeyExportPolicy Exportable `
+    -NotAfter (Get-Date).AddYears(3)
+
+Export-PfxCertificate -Cert $cert -FilePath ".\certificate.pfx" -Password (New-Object Security.SecureString)
+Export-Certificate -Cert $cert -FilePath ".\certificate.cer" -Type CERT
+
+echo "Certificate OK! Thumbprint: $($cert.Thumbprint)"
+
+
+مرحله ۳: certificate.pfx رو base64 کن
+------------------------------
+$bytes = [IO.File]::ReadAllBytes(".\certificate.pfx")
+$base64 = [Convert]::ToBase64String($bytes)
+echo $base64 | Out-File -FilePath "cert-base64.txt"
+echo "Base64 saved to cert-base64.txt"
+
+
+مرحله ۴: GitHub Secret اضافه کن
+------------------------------
+1. برو: https://github.com/PeDitXOS/PeDitXCDN-Windows/settings/secrets/actions
+2. کلیک: "New repository secret"
+3. Name: CERTIFICATE_BASE64
+4. Value: محتوای فایل cert-base64.txt
+5. کلیک: "Add secret"
+
+
+مرحله ۵: تست کن
+------------------------------
+git add -A
+git commit -m "test: certificate setup"
+git push origin main
+git tag v0.3.0
+git push origin v0.3.0
+
+GitHub Actions خودکار app رو sign شده build میکنه!
+
+
+
+========================================
+  نکات مهم
+========================================
+
+- certificate.cer هم ساخته میشه - این فایل رو
+  توی پوشه tools نگه دار (بعداً لازم میشه)
+
+- certificate.pfx فایل خصوصیه - هرگز آپلودش نکن!
+
+- اسکریپت tools/generate-cert.ps1 هم همین کارها رو میکنه
+  ولی بهتره دستی اجرا کنی تا مطمئن بشی
+
+- بعد از push کردن secret، هر tag جدیدی که بزنی
+  خودکار با certificate امضا میشه
