@@ -40,31 +40,48 @@ export function ConnectButton() {
     }
   };
 
+  const stateClass = loading
+    ? "connecting"
+    : connectionStatus === "connected"
+    ? "connected"
+    : connectionStatus === "error"
+    ? "error"
+    : "disconnected";
+
+  const label = loading
+    ? "در حال اتصال..."
+    : connectionStatus === "connected"
+    ? "قطع اتصال"
+    : "اتصال";
+
+  const sublabel = loading
+    ? "پیکربندی DNS..."
+    : connectionStatus === "connected"
+    ? "DNS فعال است"
+    : relayIp
+    ? `目标: ${relayIp}`
+    : "آماده اتصال";
+
   return (
-    <button
-      onClick={toggle}
-      disabled={loading || !relayIp}
-      className="w-full text-lg"
-      style={{
-        background: loading
-          ? "var(--border)"
-          : connectionStatus === "connected"
-          ? "var(--danger)"
-          : "linear-gradient(135deg, var(--p), var(--p2))",
-        color: "var(--bg)",
-        fontWeight: 700,
-        padding: "16px",
-        borderRadius: "16px",
-        opacity: !relayIp ? 0.4 : 1,
-        cursor: !relayIp ? "not-allowed" : "pointer",
-        transition: "all 0.2s",
-      }}
-    >
-      {loading
-        ? "در حال اتصال..."
-        : connectionStatus === "connected"
-        ? "قطع اتصال"
-        : "اتصال"}
+    <button onClick={toggle} disabled={loading || !relayIp}
+            className={`connect-btn ${stateClass}`}>
+      {/* Pulse animation when connected */}
+      {connectionStatus === "connected" && (
+        <div className="absolute inset-0 rounded-2xl glow-success" />
+      )}
+
+      <div className="relative z-10">
+        {/* Icon */}
+        <div className="text-3xl mb-2">
+          {loading ? "⏳" : connectionStatus === "connected" ? "🟢" : "⚡"}
+        </div>
+
+        {/* Main Label */}
+        <div className="text-lg font-bold">{label}</div>
+
+        {/* Sub Label */}
+        <div className="text-xs mt-1 opacity-70">{sublabel}</div>
+      </div>
     </button>
   );
 }

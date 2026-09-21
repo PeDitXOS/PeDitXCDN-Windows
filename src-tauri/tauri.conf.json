@@ -14,8 +14,8 @@
       {
         "label": "main",
         "title": "PeDitXCDN",
-        "width": 480,
-        "height": 700,
+        "width": 420,
+        "height": 680,
         "resizable": false,
         "visible": true,
         "center": true,
@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' https: http://127.0.0.1:*; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+      "csp": "default-src 'self'; connect-src 'self' https: http://127.0.0.1:*; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:"
     },
     "trayIcon": {
       "iconPath": "icons/icon.png",

@@ -6,84 +6,115 @@
   :root {
     --p: #00d4aa;
     --p2: #00b894;
-    --bg: #0f1117;
-    --card: #1a1d27;
-    --card-hover: #22262f;
-    --border: #2a2e3a;
-    --text: #e4e7ec;
-    --muted: #7a8094;
-    --danger: #ff5050;
-    --warn: #f1fa8c;
+    --bg: #0a0e17;
+    --bg2: #0f1420;
+    --card: #141924;
+    --card-hover: #1a2030;
+    --border: #1e2536;
+    --border-light: #2a3348;
+    --text: #e8ecf4;
+    --muted: #5a6478;
+    --danger: #ff4757;
+    --warn: #ffa502;
     --success: #00d4aa;
+    --accent: #6c5ce7;
   }
 
   body {
     @apply antialiased;
-    font-family: "Vazirmatn", "Segoe UI", system-ui, sans-serif;
+    font-family: "Inter", "Vazirmatn", "Segoe UI", system-ui, sans-serif;
     background: var(--bg);
     color: var(--text);
+    overflow: hidden;
   }
 
   * {
     scrollbar-width: thin;
     scrollbar-color: var(--border) transparent;
   }
+
+  ::selection {
+    background: rgba(0, 212, 170, 0.3);
+    color: var(--text);
+  }
 }
 
 @layer components {
+  /* === Cards === */
   .card {
     background: var(--card);
     border: 1px solid var(--border);
-    @apply rounded-2xl p-5 transition-colors duration-200;
+    @apply rounded-2xl transition-all duration-200;
   }
 
-  .card:hover {
+  .card-hover:hover {
     background: var(--card-hover);
+    border-color: var(--border-light);
   }
 
+  /* === Buttons === */
   .btn-primary {
     background: linear-gradient(135deg, var(--p), var(--p2));
-    color: #0f1117;
-    @apply font-bold py-3 px-6 rounded-xl transition-all duration-200;
+    color: #0a0e17;
+    @apply font-bold rounded-xl transition-all duration-200;
   }
 
   .btn-primary:hover {
     opacity: 0.9;
     transform: translateY(-1px);
+    box-shadow: 0 8px 24px rgba(0, 212, 170, 0.25);
   }
 
   .btn-primary:active {
     transform: translateY(0);
+    box-shadow: none;
   }
 
   .btn-primary:disabled {
-    opacity: 0.4;
+    opacity: 0.35;
     cursor: not-allowed;
     transform: none;
+    box-shadow: none;
   }
 
   .btn-danger {
-    background: var(--danger);
+    background: linear-gradient(135deg, var(--danger), #e8384f);
     color: white;
-    @apply font-bold py-3 px-6 rounded-xl transition-all duration-200;
+    @apply font-bold rounded-xl transition-all duration-200;
   }
 
   .btn-danger:hover {
     opacity: 0.9;
+    transform: translateY(-1px);
+    box-shadow: 0 8px 24px rgba(255, 71, 87, 0.25);
   }
 
   .btn-ghost {
     background: transparent;
     border: 1px solid var(--border);
     color: var(--muted);
-    @apply font-medium py-2 px-4 rounded-xl transition-all duration-200;
+    @apply font-medium rounded-xl transition-all duration-200;
   }
 
   .btn-ghost:hover {
     border-color: var(--p);
     color: var(--p);
+    background: rgba(0, 212, 170, 0.05);
   }
 
+  .btn-icon {
+    @apply flex items-center justify-center gap-2 rounded-xl transition-all duration-200;
+    background: var(--card);
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  .btn-icon:hover {
+    background: var(--card-hover);
+    border-color: var(--border-light);
+  }
+
+  /* === Inputs === */
   .input {
     @apply w-full px-4 py-3 rounded-xl outline-none transition-all duration-200;
     background: var(--bg);
@@ -93,42 +124,140 @@
 
   .input:focus {
     border-color: var(--p);
-    box-shadow: 0 0 0 2px rgba(0, 212, 170, 0.15);
+    box-shadow: 0 0 0 3px rgba(0, 212, 170, 0.1);
   }
 
   .input::placeholder {
     color: var(--muted);
   }
 
-  .glow {
-    box-shadow: 0 0 20px rgba(0, 212, 170, 0.15);
+  /* === Connection Button (Big) === */
+  .connect-btn {
+    @apply relative w-full rounded-2xl font-bold text-lg transition-all duration-300;
+    padding: 20px;
+    overflow: hidden;
   }
 
-  .status-dot {
-    @apply w-2.5 h-2.5 rounded-full;
+  .connect-btn::before {
+    content: '';
+    @apply absolute inset-0 rounded-2xl;
+    opacity: 0;
+    transition: opacity 0.3s;
   }
 
-  .status-dot.connected {
+  .connect-btn.disconnected {
+    background: linear-gradient(135deg, var(--p), var(--p2));
+    color: #0a0e17;
+  }
+
+  .connect-btn.disconnected:hover {
+    box-shadow: 0 0 40px rgba(0, 212, 170, 0.3);
+    transform: translateY(-2px);
+  }
+
+  .connect-btn.connected {
+    background: linear-gradient(135deg, #1a3a2a, #0f2a1a);
+    border: 2px solid var(--success);
+    color: var(--success);
+  }
+
+  .connect-btn.connected:hover {
+    box-shadow: 0 0 40px rgba(0, 212, 170, 0.15);
+  }
+
+  .connect-btn.connecting {
+    background: var(--card);
+    border: 2px solid var(--warn);
+    color: var(--warn);
+    cursor: wait;
+  }
+
+  .connect-btn.error {
+    background: linear-gradient(135deg, #3a1a1a, #2a0f0f);
+    border: 2px solid var(--danger);
+    color: var(--danger);
+  }
+
+  /* === Status Indicator === */
+  .status-ring {
+    @apply relative w-4 h-4 rounded-full;
+  }
+
+  .status-ring::after {
+    content: '';
+    @apply absolute inset-0 rounded-full;
+    animation: ping-ring 1.5s infinite;
+  }
+
+  .status-ring.connected {
     background: var(--success);
-    box-shadow: 0 0 8px var(--success);
-    animation: pulse-glow 2s infinite;
+    box-shadow: 0 0 12px var(--success);
   }
 
-  .status-dot.disconnected {
+  .status-ring.connected::after {
+    background: var(--success);
+  }
+
+  .status-ring.disconnected {
     background: var(--muted);
   }
 
-  .status-dot.connecting {
+  .status-ring.connecting {
     background: var(--warn);
-    animation: pulse-glow 1s infinite;
+    box-shadow: 0 0 12px var(--warn);
   }
 
-  .status-dot.error {
-    background: var(--danger);
+  @keyframes ping-ring {
+    0% { transform: scale(1); opacity: 0.8; }
+    100% { transform: scale(2.5); opacity: 0; }
   }
-}
 
-@keyframes pulse-glow {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+  /* === Stat Card === */
+  .stat-card {
+    @apply p-4 rounded-xl text-center;
+    background: var(--bg);
+    border: 1px solid var(--border);
+  }
+
+  .stat-card .stat-value {
+    @apply text-xl font-bold;
+    color: var(--p);
+  }
+
+  .stat-card .stat-label {
+    @apply text-xs mt-1;
+    color: var(--muted);
+  }
+
+  /* === Progress Bar === */
+  .progress-track {
+    @apply w-full h-2 rounded-full overflow-hidden;
+    background: var(--border);
+  }
+
+  .progress-fill {
+    @apply h-full rounded-full transition-all duration-700 ease-out;
+  }
+
+  /* === Navigation Link === */
+  .nav-link {
+    @apply flex items-center gap-3 p-3 rounded-xl transition-all duration-200 cursor-pointer;
+    color: var(--text);
+    text-decoration: none;
+  }
+
+  .nav-link:hover {
+    background: var(--card-hover);
+  }
+
+  /* === Glow effects === */
+  .glow-success {
+    box-shadow: 0 0 30px rgba(0, 212, 170, 0.2),
+                inset 0 0 30px rgba(0, 212, 170, 0.05);
+  }
+
+  .glow-danger {
+    box-shadow: 0 0 30px rgba(255, 71, 87, 0.2),
+                inset 0 0 30px rgba(255, 71, 87, 0.05);
+  }
 }

@@ -6,14 +6,16 @@ import { StatusCard } from "./StatusCard";
 import { QuotaBar } from "./QuotaBar";
 import { PlansList } from "./PlansList";
 
+const PANEL_URL_FALLBACK = "https://docproir.peditxcdn.ir:8443";
+const BOT_USERNAME = "PeDitXDNS_bot";
+
 export function Dashboard() {
   const {
-    session, panelUrl, userInfo, setUserInfo,
-    setPlans, setRelayIp, setDnsStatus,
+    session, panelUrl, userInfo,
+    setUserInfo, setPlans, setRelayIp, setDnsStatus,
     setConnectionStatus, logout, setError, setScreen,
   } = useAppStore();
 
-  // Fetch user data on mount
   useEffect(() => {
     if (!session) {
       setScreen("login");
@@ -22,7 +24,6 @@ export function Dashboard() {
 
     const fetchData = async () => {
       try {
-        // Fetch user info
         const info = await invoke<{
           ok: boolean; name?: string; ip?: string; seen_ip?: string;
           gb_used?: number; gb_total?: number; days_left?: number;
@@ -32,17 +33,14 @@ export function Dashboard() {
 
         if (info.ok) {
           setUserInfo(info as never);
-          // Relay IP comes from the user's registered IP or seen IP
           const ip = info.ip || info.seen_ip;
           if (ip) setRelayIp(ip);
         } else {
-          // Session expired or invalid
           logout();
           setScreen("login");
           return;
         }
 
-        // Fetch plans
         const plansResp = await invoke<{
           ok: boolean; plans?: Array<{
             id: number; name: string; price: number;
@@ -54,13 +52,11 @@ export function Dashboard() {
           setPlans(plansResp.plans);
         }
 
-        // Get current DNS status
         const dns = await invoke<{
           configured: boolean; current_dns?: string; interface: string;
         }>("get_dns_status");
         setDnsStatus(dns as never);
 
-        // Only mark "connected" if DNS is set to the relay IP specifically
         const relayIp = info.ip || info.seen_ip;
         if (relayIp && dns.configured && dns.current_dns === relayIp) {
           setConnectionStatus("connected");
@@ -74,54 +70,134 @@ export function Dashboard() {
   }, [session]);
 
   const handleLogout = async () => {
-    try {
-      await invoke("disconnect").catch(() => {});
-    } catch {}
+    try { await invoke("disconnect").catch(() => {}); } catch {}
     logout();
   };
 
+  const openPanel = () => {
+    window.open(panelUrl || PANEL_URL_FALLBACK, "_blank");
+  };
+
+  const openBot = () => {
+    window.open(`https://t.me/${BOT_USERNAME}`, "_blank");
+  };
+
   return (
-    <div className="min-h-screen p-6 max-w-lg mx-auto space-y-5">
+    <div className="h-screen flex flex-col overflow-hidden" style={{ background: "var(--bg)" }}>
       {/* Header */}
-      <header className="flex items-center justify-between">
+      <header className="flex items-center justify-between px-5 py-3 shrink-0"
+              style={{ borderBottom: "1px solid var(--border)" }}>
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl flex items-center justify-center"
+          <div className="w-8 h-8 rounded-lg flex items-center justify-center"
                style={{ background: "linear-gradient(135deg, var(--p), var(--p2))" }}>
-            <span className="text-sm font-black" style={{ color: "var(--bg)" }}>PX</span>
+            <span className="text-xs font-black" style={{ color: "var(--bg)" }}>PX</span>
           </div>
           <div>
-            <h1 className="text-lg font-bold" style={{ color: "var(--p)" }}>PeDitXCDN</h1>
-            <p className="text-xs" style={{ color: "var(--muted)" }}>
+            <h1 className="text-sm font-bold" style={{ color: "var(--p)" }}>PeDitXCDN</h1>
+            <p className="text-[10px]" style={{ color: "var(--muted)" }}>
               {userInfo?.plan_name || "سرویس CDN"}
             </p>
           </div>
         </div>
-        <button onClick={handleLogout} className="btn-ghost text-sm">
-          خروج
-        </button>
+        <div className="flex items-center gap-2">
+          <div className={`status-ring ${useAppStore.getState().connectionStatus}`} />
+          <button onClick={handleLogout}
+                  className="text-xs px-3 py-1.5 rounded-lg transition-colors"
+                  style={{ color: "var(--muted)", border: "1px solid var(--border)" }}>
+            خروج
+          </button>
+        </div>
       </header>
 
-      {/* Connect Button */}
-      <ConnectButton />
+      {/* Scrollable Content */}
+      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
 
-      {/* Status */}
-      <StatusCard />
+        {/* Connect Button - Large Center */}
+        <ConnectButton />
 
-      {/* Quota */}
-      <QuotaBar />
+        {/* Account Info Card */}
+        {userInfo && (
+          <div className="card p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium" style={{ color: "var(--muted)" }}>
+                اطلاعات حساب
+              </span>
+              <span className="text-xs px-2 py-0.5 rounded-full font-medium"
+                    style={{
+                      background: userInfo.status === "active"
+                        ? "rgba(0,212,170,0.15)" : "rgba(255,71,87,0.15)",
+                      color: userInfo.status === "active"
+                        ? "var(--success)" : "var(--danger)",
+                    }}>
+                {userInfo.status === "active" ? "فعال" : "غیرفعال"}
+              </span>
+            </div>
 
-      {/* Plans */}
-      <PlansList />
+            {/* Stats Grid */}
+            <div className="grid grid-cols-3 gap-2">
+              <div className="stat-card">
+                <div className="stat-value text-base">
+                  {userInfo.days_left ?? "—"}
+                </div>
+                <div className="stat-label">روز باقیمانده</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-value text-base">
+                  {userInfo.speed_mbps ?? "—"}
+                </div>
+                <div className="stat-label">سرعت (Mb/s)</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-value text-base">
+                  {userInfo.gb_used?.toFixed(1) ?? "0"}
+                </div>
+                <div className="stat-label">GB مصرفی</div>
+              </div>
+            </div>
 
-      {/* Expiry info */}
-      {userInfo?.expires && (
-        <div className="card">
-          <div className="flex items-center justify-between">
-            <span className="text-sm" style={{ color: "var(--muted)" }}>تاریخ انقضا</span>
-            <span className="text-sm font-medium">{userInfo.expires}</span>
+            {/* Quota Progress */}
+            {userInfo.gb_total && (
+              <QuotaBar />
+            )}
+
+            {/* Expiry */}
+            {userInfo.expires && (
+              <div className="flex items-center justify-between pt-1">
+                <span className="text-xs" style={{ color: "var(--muted)" }}>تاریخ انقضا</span>
+                <span className="text-xs font-medium">{userInfo.expires}</span>
+              </div>
+            )}
           </div>
+        )}
+
+        {/* Status */}
+        <StatusCard />
+
+        {/* Quick Actions */}
+        <div className="grid grid-cols-2 gap-3">
+          <button onClick={openPanel} className="card card-hover p-4 text-center space-y-2">
+            <div className="text-2xl">💳</div>
+            <div className="text-xs font-medium" style={{ color: "var(--text)" }}>شارژ مجدد</div>
+            <div className="text-[10px]" style={{ color: "var(--muted)" }}>پنل کاربری</div>
+          </button>
+          <button onClick={openBot} className="card card-hover p-4 text-center space-y-2">
+            <div className="text-2xl">💬</div>
+            <div className="text-xs font-medium" style={{ color: "var(--text)" }}>پشتیبانی</div>
+            <div className="text-[10px]" style={{ color: "var(--muted)" }}>تلگرام</div>
+          </button>
         </div>
-      )}
+
+        {/* Plans */}
+        <PlansList />
+      </div>
+
+      {/* Bottom Bar - Branding */}
+      <div className="shrink-0 text-center py-2"
+           style={{ borderTop: "1px solid var(--border)" }}>
+        <span className="text-[10px]" style={{ color: "var(--muted)" }}>
+          PeDitXCDN v0.2.0
+        </span>
+      </div>
     </div>
   );
 }
