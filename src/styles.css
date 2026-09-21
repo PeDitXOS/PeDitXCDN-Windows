@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-brand: 22 163 74;
+  }
+
+  body {
+    @apply bg-gray-950 text-gray-100 antialiased;
+    font-family: "Vazirmatn", system-ui, sans-serif;
+  }
+}
+
+@layer components {
+  .glass {
+    @apply bg-gray-900/60 backdrop-blur-md border border-gray-800/50 rounded-2xl;
+  }
+}
