@@ -1,28 +1,88 @@
 import { create } from "zustand";
-import type { ConnectionStatus, PanelData } from "./types";
+import type { AppScreen, ConnectionStatus, UserInfo, Plan, DnsStatus } from "./types";
 
 interface AppState {
-  connected: boolean;
-  status: ConnectionStatus;
-  relay_ip: string | null;
-  error: string | null;
-  panel_data: PanelData | null;
-  setConnected: (v: boolean) => void;
-  setStatus: (s: ConnectionStatus) => void;
+  // Navigation
+  screen: AppScreen;
+  setScreen: (s: AppScreen) => void;
+
+  // Auth
+  session: string | null;
+  panelUrl: string;
+  setSession: (s: string | null) => void;
+  setPanelUrl: (u: string) => void;
+
+  // User data
+  userInfo: UserInfo | null;
+  plans: Plan[];
+  setUserInfo: (u: UserInfo | null) => void;
+  setPlans: (p: Plan[]) => void;
+
+  // Connection
+  connectionStatus: ConnectionStatus;
+  relayIp: string | null;
+  dnsStatus: DnsStatus | null;
+  setConnectionStatus: (s: ConnectionStatus) => void;
   setRelayIp: (ip: string | null) => void;
+  setDnsStatus: (d: DnsStatus | null) => void;
+
+  // Error
+  error: string | null;
   setError: (e: string | null) => void;
-  setPanelData: (d: PanelData | null) => void;
+
+  // Logout
+  logout: () => void;
 }
 
+// Load persisted values from localStorage
+const savedPanelUrl = typeof window !== "undefined"
+  ? localStorage.getItem("peditx_panel_url") || "https://docproir.peditxcdn.ir:8443"
+  : "https://docproir.peditxcdn.ir:8443";
+const savedSession = typeof window !== "undefined"
+  ? localStorage.getItem("peditx_session")
+  : null;
+
 export const useAppStore = create<AppState>((set) => ({
-  connected: false,
-  status: "disconnected",
-  relay_ip: null,
+  screen: savedSession ? "dashboard" : "login",
+  setScreen: (screen) => set({ screen }),
+
+  session: savedSession,
+  panelUrl: savedPanelUrl,
+  setSession: (session) => {
+    if (session) localStorage.setItem("peditx_session", session);
+    else localStorage.removeItem("peditx_session");
+    set({ session });
+  },
+  setPanelUrl: (panelUrl) => {
+    localStorage.setItem("peditx_panel_url", panelUrl);
+    set({ panelUrl });
+  },
+
+  userInfo: null,
+  plans: [],
+  setUserInfo: (userInfo) => set({ userInfo }),
+  setPlans: (plans) => set({ plans }),
+
+  connectionStatus: "disconnected",
+  relayIp: null,
+  dnsStatus: null,
+  setConnectionStatus: (connectionStatus) => set({ connectionStatus }),
+  setRelayIp: (relayIp) => set({ relayIp }),
+  setDnsStatus: (dnsStatus) => set({ dnsStatus }),
+
   error: null,
-  panel_data: null,
-  setConnected: (connected) => set({ connected }),
-  setStatus: (status) => set({ status }),
-  setRelayIp: (relay_ip) => set({ relay_ip }),
   setError: (error) => set({ error }),
-  setPanelData: (panel_data) => set({ panel_data }),
+
+  logout: () => {
+    localStorage.removeItem("peditx_session");
+    set({
+      session: null,
+      screen: "login",
+      userInfo: null,
+      plans: [],
+      connectionStatus: "disconnected",
+      relayIp: null,
+      error: null,
+    });
+  },
 }));

@@ -1,25 +1,58 @@
+export type AppScreen = "login" | "dashboard";
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 
-export interface PanelData {
-  relay_ip: string;
-  relay_port: number;
-  sub_domain: string;
-  panel_url: string;
-  quota_used: number;
-  quota_total: number;
-  expire_date: string;
+export interface LoginResponse {
+  ok: boolean;
+  session?: string;
+  message?: string;
 }
 
-export interface ConnectionState {
-  status: ConnectionStatus;
-  relay_ip: string | null;
-  error: string | null;
-  panel_data: PanelData | null;
+export interface UserInfo {
+  ok: boolean;
+  name?: string;
+  telegram_id?: number;
+  ip?: string;
+  used?: number;
+  quota?: number;
+  status?: string;
+  wallet?: number;
+  plan?: string;
+  plan_name?: string;
+  renews?: string;
+  expires?: string;
+  speed_kbps?: number;
+  speed_mbps?: number;
+  days_left?: number;
+  gb_used?: number;
+  gb_total?: number;
+  warned?: unknown;
+  seen_ip?: string;
 }
 
-export interface DnsRecord {
-  domain: string;
-  record_type: string;
-  value: string;
-  ttl: number;
+export interface Plan {
+  id: number;
+  name: string;
+  price: number;
+  desc?: string;
+  days?: number;
+  gb?: number;
+  mbps?: number;
+}
+
+export interface PlansResponse {
+  ok: boolean;
+  plans?: Plan[];
+  current?: number;
+}
+
+export interface SimpleResponse {
+  ok: boolean;
+  message?: string;
+}
+
+export interface DnsStatus {
+  configured: boolean;
+  current_dns?: string;
+  interface: string;
+  is_relay_dns: boolean;
 }

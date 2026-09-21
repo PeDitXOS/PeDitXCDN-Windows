@@ -1,66 +1,66 @@
 import { useAppStore } from "../store";
 
 export function StatusCard() {
-  const { status, relay_ip, panel_data, error } = useAppStore();
+  const { connectionStatus, relayIp, userInfo, error, dnsStatus } = useAppStore();
 
-  const statusLabel = {
+  const statusLabel: Record<string, string> = {
     disconnected: "قطع شده",
     connecting: "در حال اتصال",
     connected: "متصل",
     error: "خطا",
-  }[status];
+  };
 
-  const statusColor = {
-    disconnected: "text-gray-400",
-    connecting: "text-yellow-400",
-    connected: "text-brand-400",
-    error: "text-red-400",
-  }[status];
-
-  const quotaPct =
-    panel_data && panel_data.quota_total > 0
-      ? Math.round((panel_data.quota_used / panel_data.quota_total) * 100)
-      : 0;
+  const statusColor: Record<string, string> = {
+    disconnected: "var(--muted)",
+    connecting: "var(--warn)",
+    connected: "var(--success)",
+    error: "var(--danger)",
+  };
 
   return (
-    <div className="bg-gray-900 rounded-2xl p-5 space-y-3 border border-gray-800">
+    <div className="card space-y-3">
+      {/* Connection Status */}
       <div className="flex items-center justify-between">
-        <span className="text-sm text-gray-400">وضعیت</span>
-        <span className={statusColor}>{statusLabel}</span>
+        <span className="text-sm" style={{ color: "var(--muted)" }}>وضعیت اتصال</span>
+        <div className="flex items-center gap-2">
+          <span className={`status-dot ${connectionStatus}`} />
+          <span className="text-sm font-medium" style={{ color: statusColor[connectionStatus] }}>
+            {statusLabel[connectionStatus]}
+          </span>
+        </div>
       </div>
 
-      {relay_ip && (
+      {/* Relay IP */}
+      {relayIp && (
         <div className="flex items-center justify-between">
-          <span className="text-sm text-gray-400">آی‌پی رله</span>
-          <span className="font-mono text-sm">{relay_ip}</span>
+          <span className="text-sm" style={{ color: "var(--muted)" }}>آی‌پی رله</span>
+          <span className="font-mono text-sm" style={{ color: "var(--text)" }}>{relayIp}</span>
         </div>
       )}
 
-      {panel_data && (
-        <>
-          <div className="flex items-center justify-between">
-            <span className="text-sm text-gray-400">ساب‌دامین</span>
-            <span className="text-sm">{panel_data.sub_domain}</span>
-          </div>
-          <div className="space-y-1">
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-gray-400">حجم مصرفی</span>
-              <span>
-                {panel_data.quota_used} / {panel_data.quota_total} MB
-              </span>
-            </div>
-            <div className="w-full bg-gray-800 rounded-full h-2">
-              <div
-                className="bg-brand-500 h-2 rounded-full transition-all"
-                style={{ width: `${quotaPct}%` }}
-              />
-            </div>
-          </div>
-        </>
+      {/* Current DNS */}
+      {dnsStatus?.current_dns && (
+        <div className="flex items-center justify-between">
+          <span className="text-sm" style={{ color: "var(--muted)" }}>DNS فعلی</span>
+          <span className="font-mono text-sm" style={{ color: "var(--text)" }}>{dnsStatus.current_dns}</span>
+        </div>
       )}
 
+      {/* User Name */}
+      {userInfo?.name && (
+        <div className="flex items-center justify-between">
+          <span className="text-sm" style={{ color: "var(--muted)" }}>کاربر</span>
+          <span className="text-sm" style={{ color: "var(--text)" }}>{userInfo.name}</span>
+        </div>
+      )}
+
+      {/* Error */}
       {error && (
-        <div className="text-red-400 text-sm bg-red-900/20 rounded-lg p-2">
+        <div className="text-sm p-3 rounded-xl" style={{
+          color: "var(--danger)",
+          background: "rgba(255,80,80,0.1)",
+          border: "1px solid rgba(255,80,80,0.2)",
+        }}>
           {error}
         </div>
       )}

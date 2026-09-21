@@ -2,33 +2,40 @@ import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store";
 
 export function ConnectButton() {
-  const { connected, status, setStatus, setConnected, setRelayIp, setError } =
-    useAppStore();
-  const loading = status === "connecting";
+  const {
+    connectionStatus, relayIp, setConnectionStatus,
+    setRelayIp, setDnsStatus, setError,
+  } = useAppStore();
+  const loading = connectionStatus === "connecting";
 
   const toggle = async () => {
-    if (connected) {
+    if (connectionStatus === "connected") {
       try {
         await invoke("disconnect");
-        setConnected(false);
-        setStatus("disconnected");
+        setConnectionStatus("disconnected");
         setRelayIp(null);
+        const dns = await invoke<{ configured: boolean; current_dns?: string }>("get_dns_status");
+        setDnsStatus(dns as never);
       } catch (e) {
         setError(String(e));
       }
       return;
     }
 
-    setStatus("connecting");
+    if (!relayIp) {
+      setError("آی‌پی رله در دسترسی نیست. ابتدا وارد شوید.");
+      return;
+    }
+
+    setConnectionStatus("connecting");
     setError(null);
     try {
-      const ip = await invoke<string>("connect");
-      setConnected(true);
-      setStatus("connected");
-      setRelayIp(ip);
+      await invoke<string>("connect", { relayIp });
+      setConnectionStatus("connected");
+      const dns = await invoke<{ configured: boolean; current_dns?: string }>("get_dns_status");
+      setDnsStatus(dns as never);
     } catch (e) {
-      setConnected(false);
-      setStatus("error");
+      setConnectionStatus("error");
       setError(String(e));
     }
   };
@@ -36,17 +43,28 @@ export function ConnectButton() {
   return (
     <button
       onClick={toggle}
-      disabled={loading}
-      className={
-        "w-full py-4 rounded-2xl text-lg font-bold transition-all duration-200 " +
-        (loading
-          ? "bg-brand-700 cursor-wait animate-pulse"
-          : connected
-            ? "bg-red-600 hover:bg-red-500"
-            : "bg-brand-600 hover:bg-brand-500")
-      }
+      disabled={loading || !relayIp}
+      className="w-full text-lg"
+      style={{
+        background: loading
+          ? "var(--border)"
+          : connectionStatus === "connected"
+          ? "var(--danger)"
+          : "linear-gradient(135deg, var(--p), var(--p2))",
+        color: "var(--bg)",
+        fontWeight: 700,
+        padding: "16px",
+        borderRadius: "16px",
+        opacity: !relayIp ? 0.4 : 1,
+        cursor: !relayIp ? "not-allowed" : "pointer",
+        transition: "all 0.2s",
+      }}
     >
-      {loading ? "در حال اتصال..." : connected ? "قطع اتصال" : "اتصال"}
+      {loading
+        ? "در حال اتصال..."
+        : connectionStatus === "connected"
+        ? "قطع اتصال"
+        : "اتصال"}
     </button>
   );
 }

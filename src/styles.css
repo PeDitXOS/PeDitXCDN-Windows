@@ -4,17 +4,131 @@
 
 @layer base {
   :root {
-    --color-brand: 22 163 74;
+    --p: #00d4aa;
+    --p2: #00b894;
+    --bg: #0f1117;
+    --card: #1a1d27;
+    --card-hover: #22262f;
+    --border: #2a2e3a;
+    --text: #e4e7ec;
+    --muted: #7a8094;
+    --danger: #ff5050;
+    --warn: #f1fa8c;
+    --success: #00d4aa;
   }
 
   body {
-    @apply bg-gray-950 text-gray-100 antialiased;
-    font-family: "Vazirmatn", system-ui, sans-serif;
+    @apply antialiased;
+    font-family: "Vazirmatn", "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
   }
 }
 
 @layer components {
-  .glass {
-    @apply bg-gray-900/60 backdrop-blur-md border border-gray-800/50 rounded-2xl;
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    @apply rounded-2xl p-5 transition-colors duration-200;
   }
+
+  .card:hover {
+    background: var(--card-hover);
+  }
+
+  .btn-primary {
+    background: linear-gradient(135deg, var(--p), var(--p2));
+    color: #0f1117;
+    @apply font-bold py-3 px-6 rounded-xl transition-all duration-200;
+  }
+
+  .btn-primary:hover {
+    opacity: 0.9;
+    transform: translateY(-1px);
+  }
+
+  .btn-primary:active {
+    transform: translateY(0);
+  }
+
+  .btn-primary:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none;
+  }
+
+  .btn-danger {
+    background: var(--danger);
+    color: white;
+    @apply font-bold py-3 px-6 rounded-xl transition-all duration-200;
+  }
+
+  .btn-danger:hover {
+    opacity: 0.9;
+  }
+
+  .btn-ghost {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    @apply font-medium py-2 px-4 rounded-xl transition-all duration-200;
+  }
+
+  .btn-ghost:hover {
+    border-color: var(--p);
+    color: var(--p);
+  }
+
+  .input {
+    @apply w-full px-4 py-3 rounded-xl outline-none transition-all duration-200;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  .input:focus {
+    border-color: var(--p);
+    box-shadow: 0 0 0 2px rgba(0, 212, 170, 0.15);
+  }
+
+  .input::placeholder {
+    color: var(--muted);
+  }
+
+  .glow {
+    box-shadow: 0 0 20px rgba(0, 212, 170, 0.15);
+  }
+
+  .status-dot {
+    @apply w-2.5 h-2.5 rounded-full;
+  }
+
+  .status-dot.connected {
+    background: var(--success);
+    box-shadow: 0 0 8px var(--success);
+    animation: pulse-glow 2s infinite;
+  }
+
+  .status-dot.disconnected {
+    background: var(--muted);
+  }
+
+  .status-dot.connecting {
+    background: var(--warn);
+    animation: pulse-glow 1s infinite;
+  }
+
+  .status-dot.error {
+    background: var(--danger);
+  }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }

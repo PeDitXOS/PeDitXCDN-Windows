@@ -1,18 +1,13 @@
-import { ConnectButton } from "./components/ConnectButton";
-import { StatusCard } from "./components/StatusCard";
-import { PanelWebview } from "./components/PanelWebview";
+import { useAppStore } from "./store";
+import { LoginScreen } from "./components/LoginScreen";
+import { Dashboard } from "./components/Dashboard";
 
 export default function App() {
-  return (
-    <div className="min-h-screen p-6 max-w-lg mx-auto space-y-6">
-      <header className="text-center space-y-1">
-        <h1 className="text-2xl font-bold text-brand-400">PeDitXCDN</h1>
-        <p className="text-sm text-gray-500">سرویس CDN اشتراکی</p>
-      </header>
+  const screen = useAppStore((s) => s.screen);
 
-      <ConnectButton />
-      <StatusCard />
-      <PanelWebview />
+  return (
+    <div className="min-h-screen">
+      {screen === "login" ? <LoginScreen /> : <Dashboard />}
     </div>
   );
 }
