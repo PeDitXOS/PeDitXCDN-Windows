@@ -50,6 +50,29 @@ jobs:
           prerelease: false
           args: '--bundles nsis,msi'
 
+      # Sign executables with self-signed certificate (if secret exists)
+      - name: Sign executables
+        if: ${{ secrets.CERTIFICATE_BASE64 != '' }}
+        shell: pwsh
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.CERTIFICATE_BASE64 }}
+        run: |
+          # Decode certificate
+          $certBytes = [Convert]::FromBase64String($env:CERTIFICATE_BASE64)
+          $certPath = "$env:TEMP\certificate.pfx"
+          [IO.File]::WriteAllBytes($certPath, $certBytes)
+
+          # Find all exe files in the build output
+          $exeFiles = Get-ChildItem -Path "src-tauri\target\release\bundle" -Recurse -Filter "*.exe"
+          foreach ($exe in $exeFiles) {
+            Write-Host "Signing: $($exe.FullName)"
+            & signtool sign /f $certPath /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $exe.FullName
+          }
+
+          # Clean up
+          Remove-Item $certPath -Force
+          Write-Host "Signing complete!"
+
       - name: Upload NSIS installer
         uses: actions/upload-artifact@v4
         with:
