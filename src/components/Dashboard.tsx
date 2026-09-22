@@ -9,6 +9,33 @@ import { PlansList } from "./PlansList";
 const PANEL_URL_FALLBACK = "https://docproir.peditxcdn.ir:8443";
 const BOT_USERNAME = "PeDitXDNS_bot";
 
+/** Whole calendar days from today until a `YYYY-MM-DD` expiry date. */
+function daysFromExpires(expires?: string): number | undefined {
+  if (!expires) return undefined;
+  const [y, m, d] = expires.split("-").map(Number);
+  if (!y || !m || !d) return undefined;
+  const end = new Date(y, m - 1, d);
+  end.setHours(0, 0, 0, 0);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.max(0, Math.round((end.getTime() - today.getTime()) / 86_400_000));
+}
+
+/**
+ * The deployed panel always reports `days_left: 0` — it computes
+ * `expires_at - now()` where `now()` returns a string, the TypeError is
+ * swallowed by `except: pass`, while `expires` itself comes back as a
+ * plain slice and renders fine. Until that ships fixed server-side,
+ * recompute here whenever the panel's answer is unusable.
+ */
+function withDays<T extends { days_left?: number; expires?: string }>(info: T): T {
+  if (!info.days_left) {
+    const d = daysFromExpires(info.expires);
+    if (d) info.days_left = d;
+  }
+  return info;
+}
+
 export function Dashboard() {
   const {
     session, panelUrl, userInfo,
@@ -46,7 +73,7 @@ export function Dashboard() {
             if (claim.ok) info.ip = info.seen_ip;
           } catch { /* non-fatal: panel still reports the old address */ }
         }
-        setUserInfo(info as never);
+        setUserInfo(withDays(info) as never);
 
         // Relay IP = the panel host. info.ip / info.seen_ip are the user's own
         // address — forwarding DNS to those would blackhole resolution.
@@ -99,9 +126,9 @@ export function Dashboard() {
           panelUrl, session, ip: info.seen_ip,
         });
         if (claim.ok) info.ip = info.seen_ip;
-        else if (claim.message) { setError(claim.message); setUserInfo(info); return; }
+        else if (claim.message) { setError(claim.message); setUserInfo(withDays(info)); return; }
       }
-      setUserInfo(info);
+      setUserInfo(withDays(info));
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -246,7 +273,7 @@ export function Dashboard() {
       <div className="shrink-0 text-center py-2"
            style={{ borderTop: "1px solid var(--border)" }}>
         <span className="text-[10px]" style={{ color: "var(--muted)" }}>
-          PeDitXCDN v0.3.7
+          PeDitXCDN v0.3.8
         </span>
       </div>
     </div>
