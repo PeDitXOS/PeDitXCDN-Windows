@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store";
 import { ConnectButton } from "./ConnectButton";
@@ -42,6 +42,8 @@ export function Dashboard() {
     setUserInfo, setPlans, setRelayIp, setDnsStatus,
     setConnectionStatus, logout, setError, setScreen,
   } = useAppStore();
+  const [updatingIp, setUpdatingIp] = useState(false);
+  const [ipOk, setIpOk] = useState(false);
 
   useEffect(() => {
     if (!session) {
@@ -117,21 +119,38 @@ export function Dashboard() {
 
   // Re-register this machine's address on demand — the relay sees our IP,
   // so a fresh user-info + claim is what actually updates the panel.
+  // The relay's ACL is keyed by this address: wrong IP = no network.
   const handleUpdateIp = async () => {
+    if (updatingIp) return;
+    setUpdatingIp(true);
+    setIpOk(false);
     try {
       const info = await invoke<typeof userInfo>("get_user_info", { panelUrl, session });
-      if (!info?.ok) return;
-      if (info.seen_ip) {
-        const claim = await invoke<{ ok: boolean; message?: string }>("claim_ip", {
-          panelUrl, session, ip: info.seen_ip,
-        });
-        if (claim.ok) info.ip = info.seen_ip;
-        else if (claim.message) { setError(claim.message); setUserInfo(withDays(info)); return; }
+      if (!info?.ok) {
+        setError("دریافت اطلاعات حساب ناموفق بود");
+        return;
       }
+      if (!info.seen_ip) {
+        setError("آی‌پی واقعی شما توسط سرور دیده نشد؛ دوباره تلاش کنید");
+        return;
+      }
+      const claim = await invoke<{ ok: boolean; message?: string }>("claim_ip", {
+        panelUrl, session, ip: info.seen_ip,
+      });
+      if (!claim.ok) {
+        setError(claim.message || "ثبت آی‌پی ناموفق بود");
+        setUserInfo(withDays(info));
+        return;
+      }
+      info.ip = info.seen_ip;
       setUserInfo(withDays(info));
       setError(null);
+      setIpOk(true);
+      setTimeout(() => setIpOk(false), 4000);
     } catch (e) {
       setError(String(e));
+    } finally {
+      setUpdatingIp(false);
     }
   };
 
@@ -222,20 +241,46 @@ export function Dashboard() {
               <QuotaBar />
             )}
 
-            {/* Registered IP */}
-            <div className="flex items-center justify-between gap-2 pt-1">
-              <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>آی‌پی ثبت‌شده</span>
-              <div className="flex items-center gap-2 min-w-0">
-                <span className="font-mono text-xs truncate"
+            {/* IP registration — the whole network keys off this being right */}
+            <div className="space-y-1.5 pt-1">
+              <div className="flex items-center justify-between">
+                <span className="text-xs" style={{ color: "var(--muted)" }}>آی‌پی ثبت‌شده در پنل</span>
+                <span className="font-mono text-xs"
                       style={{ color: userInfo.ip ? "var(--text)" : "var(--danger)" }}>
                   {userInfo.ip || "ثبت نشده"}
                 </span>
-                <button onClick={handleUpdateIp} title="به‌روزرسانی آی‌پی در پنل"
-                        className="text-xs px-2 py-1 rounded-lg shrink-0 transition-colors"
-                        style={{ color: "var(--p)", border: "1px solid var(--border)" }}>
-                  ⟳
-                </button>
               </div>
+              <div className="flex items-center justify-between">
+                <span className="text-xs" style={{ color: "var(--muted)" }}>آی‌پی واقعی شما</span>
+                <span className="font-mono text-xs" style={{ color: "var(--text)" }}>
+                  {userInfo.seen_ip || "—"}
+                </span>
+              </div>
+
+              {userInfo.seen_ip && userInfo.seen_ip !== userInfo.ip && (
+                <p className="text-[11px] leading-5 p-2 rounded-lg"
+                   style={{ color: "var(--warn)", background: "rgba(255,193,7,0.08)",
+                            border: "1px solid rgba(255,193,7,0.25)" }}>
+                  آی‌پی شما تغییر کرده و هنوز در پنل ثبت نشده؛ تا ثبت نشود شبکه کار نمی‌کند.
+                </p>
+              )}
+
+              <button onClick={handleUpdateIp} disabled={updatingIp}
+                      className="w-full flex items-center justify-center gap-2 mt-1
+                                 py-3 rounded-xl text-sm font-bold transition-all"
+                      style={{
+                        color: "var(--p)",
+                        border: "1.5px solid var(--p)",
+                        background: updatingIp ? "rgba(0,212,170,0.18)" : "rgba(0,212,170,0.08)",
+                        opacity: updatingIp ? 0.75 : 1,
+                        boxShadow: ipOk ? "0 0 14px rgba(0,212,170,0.25)" : "none",
+                      }}>
+                <span className={"inline-block text-base " + (updatingIp ? "animate-spin" : "")}
+                      style={{ animationDuration: "0.8s" }}>
+                  ⟳
+                </span>
+                {updatingIp ? "در حال ثبت آی‌پی..." : ipOk ? "آی‌پی ثبت شد ✓" : "به‌روزرسانی آی‌پی"}
+              </button>
             </div>
 
             {/* Expiry */}
@@ -273,7 +318,7 @@ export function Dashboard() {
       <div className="shrink-0 text-center py-2"
            style={{ borderTop: "1px solid var(--border)" }}>
         <span className="text-[10px]" style={{ color: "var(--muted)" }}>
-          PeDitXCDN v0.3.8
+          PeDitXCDN v0.3.9
         </span>
       </div>
     </div>

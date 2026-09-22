@@ -185,21 +185,36 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+/// True when this process has an elevated admin token.
+/// `net session` exits non-zero without one. If the Server service is off
+/// this reads false for a real admin — harmless, because ensure_admin's
+/// `--elevated` guard bounds it to a single relaunch.
+#[cfg(target_os = "windows")]
+fn is_elevated() -> bool {
+    std::process::Command::new("net")
+        .args(["session"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Check if running as admin, and relaunch with UAC if not.
 /// Uses --elevated flag to prevent infinite restart loop.
 #[cfg(target_os = "windows")]
 fn ensure_admin() {
     let already_elevated = std::env::args().any(|a| a == "--elevated");
 
-    // Try to bind port 53 — if it works, we have admin
-    use std::net::UdpSocket;
-    if UdpSocket::bind("127.0.0.1:53").is_ok() {
+    // Ask about the token, don't infer it from a bind test. Port 53 is not
+    // in Windows' excluded ranges by default, so an unelevated process
+    // binds it happily, the old check concluded "we have admin", and the
+    // first `netsh set dns` then failed with "requires elevation".
+    if is_elevated() {
         return;
     }
 
-    // Already tried elevation but still can't bind — continue anyway (port may be held by system)
+    // Already relaunched once — a false negative here must not loop.
     if already_elevated {
-        eprintln!("[PeDitXCDN] Already elevated but port 53 still unavailable, continuing...");
+        eprintln!("[PeDitXCDN] Elevation requested but admin check still fails, continuing...");
         return;
     }
 

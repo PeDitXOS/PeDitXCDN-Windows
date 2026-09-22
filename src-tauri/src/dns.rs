@@ -16,28 +16,53 @@ static SHUTDOWN: Mutex<Option<watch::Sender<bool>>> = Mutex::new(None);
 
 // ─── System DNS helpers (netsh) ───────────────────────────────────────
 
+/// Every connected non-loopback interface name, most likely first.
+/// More than one because the state column is localized and the guessed
+/// name may simply not exist — trying them in turn beats guessing once.
 #[cfg(target_os = "windows")]
-fn get_active_interface() -> Result<String, String> {
-    let output = Command::new("netsh")
+fn interface_candidates() -> Vec<String> {
+    let mut found = Vec::new();
+    if let Ok(output) = Command::new("netsh")
         .args(["interface", "ip", "show", "interfaces"])
         .output()
-        .map_err(|e| format!("failed to run netsh: {e}"))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let lower = line.to_lowercase();
-        if lower.contains("connected") && !lower.contains("loopback") {
+    {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 {
-                if let Some(idx) = parts.iter().position(|&p| p.eq_ignore_ascii_case("connected")) {
-                    if idx + 1 < parts.len() {
-                        return Ok(parts[idx + 1..].join(" "));
-                    }
+            // Idx Met MTU State Name — Idx must be numeric or this is the
+            // other `show interface` layout, where "Connected" is column 0
+            // and joining after it would swallow the Type column too.
+            if parts.len() < 4 || parts[0].parse::<u32>().is_err() {
+                continue;
+            }
+            if line.to_lowercase().contains("loopback") {
+                continue;
+            }
+            if let Some(idx) = parts.iter().position(|p| p.eq_ignore_ascii_case("connected")) {
+                if idx + 1 < parts.len() {
+                    found.push(parts[idx + 1..].join(" "));
                 }
             }
         }
     }
-    Ok("Ethernet".to_string())
+    for guess in ["Ethernet", "Wi-Fi", "Local Area Connection"] {
+        if !found.iter().any(|f| f == guess) {
+            found.push(guess.to_string());
+        }
+    }
+    found
+}
+
+#[cfg(not(target_os = "windows"))]
+fn interface_candidates() -> Vec<String> {
+    vec!["eth0".to_string()]
+}
+
+#[cfg(target_os = "windows")]
+fn get_active_interface() -> Result<String, String> {
+    Ok(interface_candidates()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "Ethernet".to_string()))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -45,20 +70,48 @@ fn get_active_interface() -> Result<String, String> {
     Ok("eth0".into())
 }
 
+/// netsh writes failures to stdout, not stderr — the old message rendered
+/// as a bare "netsh set dns failed:" and hid the actual reason.
+fn netsh_out(out: &std::process::Output) -> String {
+    let mut s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !err.is_empty() {
+        if !s.is_empty() {
+            s.push(' ');
+        }
+        s.push_str(&err);
+    }
+    if s.is_empty() {
+        format!("exit {:?}", out.status.code());
+    } else {
+        s
+    }
+}
+
+/// Run `netsh ... set dns <iface> ...` against every candidate interface
+/// until one accepts.
+#[cfg(target_os = "windows")]
+fn netsh_set_dns(args: &[&str], what: &str) -> Result<(), String> {
+    let mut errs = Vec::new();
+    for iface in interface_candidates() {
+        let mut full = vec!["interface", "ip", "set", "dns", iface.as_str()];
+        full.extend_from_slice(args);
+        let out = match Command::new("netsh").args(&full).output() {
+            Ok(o) => o,
+            Err(e) => return Err(format!("failed to run netsh: {e}")),
+        };
+        if out.status.success() {
+            return Ok(());
+        }
+        errs.push(format!("{iface}: {}", netsh_out(&out)));
+    }
+    Err(format!("netsh {what} failed -> {}", errs.join(" | ")))
+}
+
 /// Set system DNS to a specific IP (used to point at our local proxy).
 #[cfg(target_os = "windows")]
 fn set_system_dns(dns_ip: &str) -> Result<(), String> {
-    let iface = get_active_interface()?;
-    let status = Command::new("netsh")
-        .args(["interface", "ip", "set", "dns", &iface, "static", dns_ip])
-        .output()
-        .map_err(|e| format!("failed to run netsh: {e}"))?;
-
-    if !status.status.success() {
-        let stderr = String::from_utf8_lossy(&status.stderr);
-        return Err(format!("netsh set dns failed: {stderr}"));
-    }
-    Ok(())
+    netsh_set_dns(&["static", dns_ip], "set dns")
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -69,17 +122,7 @@ fn set_system_dns(_dns_ip: &str) -> Result<(), String> {
 /// Restore system DNS to DHCP (automatic).
 #[cfg(target_os = "windows")]
 pub fn restore_system_dns() -> Result<(), String> {
-    let iface = get_active_interface()?;
-    let status = Command::new("netsh")
-        .args(["interface", "ip", "set", "dns", &iface, "dhcp"])
-        .output()
-        .map_err(|e| format!("failed to run netsh: {e}"))?;
-
-    if !status.status.success() {
-        let stderr = String::from_utf8_lossy(&status.stderr);
-        return Err(format!("netsh restore dns failed: {stderr}"));
-    }
-    Ok(())
+    netsh_set_dns(&["dhcp"], "restore dns")
 }
 
 #[cfg(not(target_os = "windows"))]
