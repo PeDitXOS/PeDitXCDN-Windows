@@ -170,8 +170,47 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+/// Check if running as admin, and relaunch with UAC if not.
+#[cfg(target_os = "windows")]
+fn ensure_admin() {
+    // Try to bind port 53 — if it fails, we need admin
+    use std::net::UdpSocket;
+    match UdpSocket::bind("0.0.0.0:53") {
+        Ok(socket) => {
+            drop(socket); // We can bind, we're admin
+            return;
+        }
+        Err(_) => {}
+    }
+
+    // Need admin — relaunch with ShellExecuteW "runas"
+    let exe_path = std::env::current_exe().expect("failed to get exe path");
+    let path_str = exe_path.to_str().unwrap();
+
+    let operation: Vec<u16> = "runas\0".encode_utf16().collect();
+    let path: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        windows_sys::Win32::UI::Shell::ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            path.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        );
+    }
+    std::process::exit(0);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ensure_admin() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Ensure running as admin (needed for DNS proxy on port 53)
+    ensure_admin();
+
     // Log panics to file for debugging — writes to %APPDATA%/PeDitXCDN/crash.log
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("PANIC: {}\n", info);

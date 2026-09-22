@@ -1,6 +1,6 @@
 [package]
 name = "peditx-cdn-client"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 description = "PeDitXCDN Windows DNS Client"
 authors = ["PeDitXOS"]
@@ -18,6 +18,8 @@ serde_json = "1"
 reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["net", "rt", "sync", "time", "macros"] }
 dirs = "5"
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [features]
 default = ["custom-protocol"]
