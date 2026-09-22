@@ -1,7 +1,32 @@
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store";
+
+const fmtRate = (bps: number) =>
+  bps >= 1e6 ? `${(bps / 1e6).toFixed(1)} MB/s`
+  : bps >= 1e3 ? `${(bps / 1e3).toFixed(0)} KB/s`
+  : `${Math.round(bps)} B/s`;
 
 export function StatusCard() {
   const { connectionStatus, relayIp, userInfo, error, dnsStatus } = useAppStore();
+  const [rate, setRate] = useState<{ recv: number; sent: number } | null>(null);
+
+  useEffect(() => {
+    if (connectionStatus !== "connected") {
+      setRate(null);
+      return;
+    }
+    let alive = true;
+    const tick = async () => {
+      try {
+        const r = await invoke<[number, number]>("get_net_speed");
+        if (alive) setRate({ recv: r[0], sent: r[1] });
+      } catch { /* keep the last sample */ }
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => { alive = false; clearInterval(id); };
+  }, [connectionStatus]);
 
   if (!connectionStatus || connectionStatus === "disconnected") return null;
 
@@ -42,6 +67,23 @@ export function StatusCard() {
         <div className="flex items-center justify-between">
           <span className="text-xs" style={{ color: "var(--muted)" }}>آی‌پی رله</span>
           <span className="font-mono text-xs" style={{ color: "var(--text)" }}>{relayIp}</span>
+        </div>
+      )}
+
+      {rate && (
+        <div className="grid grid-cols-2 gap-2 pt-1">
+          <div className="stat-card">
+            <div className="stat-value text-sm" style={{ color: "var(--success)" }}>
+              ↓ {fmtRate(rate.recv)}
+            </div>
+            <div className="stat-label">دانلود</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-value text-sm" style={{ color: "var(--p)" }}>
+              ↑ {fmtRate(rate.sent)}
+            </div>
+            <div className="stat-label">آپلود</div>
+          </div>
         </div>
       )}
 

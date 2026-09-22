@@ -217,7 +217,7 @@ export function Dashboard() {
       <div className="shrink-0 text-center py-2"
            style={{ borderTop: "1px solid var(--border)" }}>
         <span className="text-[10px]" style={{ color: "var(--muted)" }}>
-          PeDitXCDN v0.3.5
+          PeDitXCDN v0.3.6
         </span>
       </div>
     </div>

@@ -113,6 +113,14 @@ fn check_relay_connection(relay_ip: String) -> Result<bool, String> {
     dns::check_relay_connection(&relay_ip)
 }
 
+// spawn_blocking: spawns netstat, must not hold the core thread.
+#[tauri::command]
+async fn get_net_speed() -> Result<(u64, u64), String> {
+    tokio::task::spawn_blocking(dns::get_net_speed)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn resolve_relay_ip(panel_url: String) -> Result<String, String> {
     tokio::task::spawn_blocking(move || dns::resolve_relay_ip(&panel_url))
@@ -300,6 +308,7 @@ pub fn run() {
             get_dns_status,
             check_relay_connection,
             resolve_relay_ip,
+            get_net_speed,
             logout,
         ])
         .run(tauri::generate_context!())

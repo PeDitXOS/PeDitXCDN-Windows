@@ -322,6 +322,65 @@ pub fn get_dns_status() -> Result<DnsStatus, String> {
     })
 }
 
+/// Previous octet counters, for turning cumulative totals into a rate.
+static NET_LAST: Mutex<Option<(std::time::Instant, u64, u64)>> = Mutex::new(None);
+
+/// Pull `Received` / `Sent` byte totals out of `netstat -e` output.
+/// ponytail: byte-offset match instead of `str[..5]` — a localized header
+/// would otherwise panic on a char boundary. Upgrade path: GetIfEntry2.
+fn parse_netstat_e(text: &str) -> Option<(u64, u64)> {
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.len() < 5 || !t.as_bytes()[..5].eq_ignore_ascii_case(b"bytes") {
+            continue;
+        }
+        let nums: Vec<u64> = t.split_whitespace().filter_map(|w| w.parse().ok()).collect();
+        // Columns are Received, then Sent.
+        if nums.len() >= 2 {
+            return Some((nums[0], nums[1]));
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn read_octets() -> Result<(u64, u64), String> {
+    let out = Command::new("netstat")
+        .args(["-e"])
+        .output()
+        .map_err(|e| format!("netstat -e failed: {e}"))?;
+    parse_netstat_e(&String::from_utf8_lossy(&out.stdout))
+        .ok_or_else(|| "netstat -e: no Bytes line".to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn read_octets() -> Result<(u64, u64), String> {
+    Ok((0, 0))
+}
+
+/// Current system-wide upload/download rate in bytes per second, (recv, sent).
+/// First call has nothing to diff against and returns zeros.
+pub fn get_net_speed() -> Result<(u64, u64), String> {
+    let (rx, tx) = read_octets()?;
+    let mut last = NET_LAST.lock().unwrap();
+    let now = std::time::Instant::now();
+    let rate = match *last {
+        Some((t0, r0, s0)) => {
+            let dt = now.duration_since(t0).as_secs_f64();
+            if dt < 0.2 {
+                return Ok((0, 0));
+            }
+            (
+                (rx.saturating_sub(r0) as f64 / dt) as u64,
+                (tx.saturating_sub(s0) as f64 / dt) as u64,
+            )
+        }
+        None => (0, 0),
+    };
+    *last = Some((now, rx, tx));
+    Ok(rate)
+}
+
 /// Resolve the panel URL host to the relay's IPv4 address — the DNS forward
 /// target. Panel and relay share a host, so this is the only address the
 /// proxy should ever point at. `info.ip` / `info.seen_ip` are the *user's*
