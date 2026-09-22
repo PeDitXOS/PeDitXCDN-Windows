@@ -172,11 +172,27 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Log panics to file for debugging
+    // Log panics to file for debugging — writes to %APPDATA%/PeDitXCDN/crash.log
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("PANIC: {}\n", info);
+        if let Some(dir) = dirs::data_dir() {
+            let log_dir = dir.join("PeDitXCDN");
+            let _ = std::fs::create_dir_all(&log_dir);
+            let _ = std::fs::write(log_dir.join("crash.log"), &msg);
+        }
+        // Also try current dir as fallback
         let _ = std::fs::write("PeDitXCDN-crash.log", &msg);
     }));
+
+    // Log startup
+    if let Some(dir) = dirs::data_dir() {
+        let log_dir = dir.join("PeDitXCDN");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let _ = std::fs::write(
+            log_dir.join("crash.log"),
+            format!("PeDitXCDN started at {:?}\n", std::time::SystemTime::now()),
+        );
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
