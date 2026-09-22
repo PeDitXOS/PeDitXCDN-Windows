@@ -131,7 +131,7 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
         &connect, &disconnect, &separator, &show, &separator2, &quit,
     ])?;
 
-    let _tray = TrayIconBuilder::new("main-tray")
+    let _tray = TrayIconBuilder::new()
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&menu)
         .tooltip("PeDitXCDN")
