@@ -197,9 +197,15 @@ pub fn run() {
 
             // Hide to tray on close instead of quitting + cleanup
             if let Some(win) = app.get_webview_window("main") {
-                win.on_window_event(|event| {
+                let handle = app.handle().clone();
+                win.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        let _ = dns::stop_dns_proxy();
+                        // Spawn async stop on tokio runtime (close handler runs on main thread)
+                        tauri::async_runtime::spawn(async {
+                            dns::stop_dns_proxy_async().await;
+                        });
+                        // Show window to tray
+                        let _ = handle.emit("tray-minimize", ());
                         api.prevent_close();
                     }
                 });

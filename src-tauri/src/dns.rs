@@ -268,10 +268,15 @@ pub fn start_dns_proxy(relay_ip: &str) -> Result<(), String> {
     rt.block_on(start_proxy(relay_ip.to_string()))
 }
 
-/// Stop the DNS proxy + restore system DNS.
+/// Stop the DNS proxy + restore system DNS (blocking version for commands).
 pub fn stop_dns_proxy() {
     let rt = tokio::runtime::Handle::current();
     rt.block_on(stop_proxy_inner());
+}
+
+/// Stop the DNS proxy + restore system DNS (async version for non-tokio threads).
+pub async fn stop_dns_proxy_async() {
+    stop_proxy_inner().await;
 }
 
 /// Get current DNS configuration status.
