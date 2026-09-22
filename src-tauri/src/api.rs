@@ -33,6 +33,8 @@ fn http_client() -> &'static Client {
             // Upgrade when panel gets a proper CA-signed cert.
             .danger_accept_invalid_certs(true)
             .cookie_store(true)
+            // Don't auto-follow redirects — we need to see the 303 location header
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("reqwest client")
     })
@@ -48,7 +50,6 @@ pub async fn login(
     log_to_file(&format!("LOGIN: url={}, user={}", url, username));
     let resp = match http_client()
         .post(&url)
-        .header("Content-Type", "application/x-www-form-urlencoded")
         .form(&[("username", username), ("password", password)])
         .send()
         .await {
