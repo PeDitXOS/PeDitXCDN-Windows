@@ -91,14 +91,14 @@ async fn claim_ip(
 
 #[tauri::command]
 fn connect(state: tauri::State<'_, AppState>, relay_ip: String) -> Result<String, String> {
-    dns::set_dns(&relay_ip)?;
+    dns::start_dns_proxy(&relay_ip)?;
     *state.connected.lock().unwrap() = true;
     Ok(relay_ip)
 }
 
 #[tauri::command]
 fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    dns::restore_dns()?;
+    dns::stop_dns_proxy();
     *state.connected.lock().unwrap() = false;
     Ok(())
 }
@@ -182,15 +182,24 @@ pub fn run() {
             panel_url: Mutex::new(None),
         })
         .setup(|app| {
+            // Crash recovery: if DNS is stuck at 127.0.0.1 from a previous crash, restore it
+            if let Ok(status) = dns::get_dns_status() {
+                if status.current_dns.as_deref() == Some("127.0.0.1") {
+                    eprintln!("[PeDitXCDN] Found stale proxy DNS, restoring DHCP...");
+                    let _ = dns::stop_dns_proxy();
+                }
+            }
+
             // Create tray - non-fatal if it fails
             if let Err(e) = create_tray(app.handle()) {
                 eprintln!("Warning: tray icon failed: {e}");
             }
 
-            // Hide to tray on close instead of quitting
+            // Hide to tray on close instead of quitting + cleanup
             if let Some(win) = app.get_webview_window("main") {
                 win.on_window_event(|event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        let _ = dns::stop_dns_proxy();
                         api.prevent_close();
                     }
                 });

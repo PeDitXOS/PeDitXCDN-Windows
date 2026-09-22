@@ -58,7 +58,7 @@ export function Dashboard() {
         setDnsStatus(dns as never);
 
         const relayIp = info.ip || info.seen_ip;
-        if (relayIp && dns.configured && dns.current_dns === relayIp) {
+        if (relayIp && dns.configured && dns.current_dns === "127.0.0.1") {
           setConnectionStatus("connected");
         }
       } catch (e) {

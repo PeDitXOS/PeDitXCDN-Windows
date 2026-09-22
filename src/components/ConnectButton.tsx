@@ -59,7 +59,7 @@ export function ConnectButton() {
     : connectionStatus === "connected"
     ? "DNS فعال است"
     : relayIp
-    ? `目标: ${relayIp}`
+    ? `هدف: ${relayIp}`
     : "آماده اتصال";
 
   return (
