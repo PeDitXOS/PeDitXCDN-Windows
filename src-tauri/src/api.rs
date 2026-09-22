@@ -171,7 +171,7 @@ pub async fn get_user_info(panel_url: &str, session: &str) -> Result<UserInfo, S
             days_left: json["days_left"].as_i64().map(|v| v as i32),
             gb_used: json["gb_used"].as_f64(),
             gb_total: json["gb_total"].as_f64(),
-            warned: json["warned"].as_i64().map(|v| v as i32),
+            warned: json["warned"].as_i64().map(|v| v as i32).map(serde_json::Value::from),
             seen_ip: json["seen_ip"].as_str().map(|s| s.to_string()),
         });
     }
