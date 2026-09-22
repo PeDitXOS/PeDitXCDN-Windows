@@ -88,6 +88,26 @@ export function Dashboard() {
     logout();
   };
 
+  // Re-register this machine's address on demand — the relay sees our IP,
+  // so a fresh user-info + claim is what actually updates the panel.
+  const handleUpdateIp = async () => {
+    try {
+      const info = await invoke<typeof userInfo>("get_user_info", { panelUrl, session });
+      if (!info?.ok) return;
+      if (info.seen_ip) {
+        const claim = await invoke<{ ok: boolean; message?: string }>("claim_ip", {
+          panelUrl, session, ip: info.seen_ip,
+        });
+        if (claim.ok) info.ip = info.seen_ip;
+        else if (claim.message) { setError(claim.message); setUserInfo(info); return; }
+      }
+      setUserInfo(info);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const openPanel = () => {
     window.open(panelUrl || PANEL_URL_FALLBACK, "_blank");
   };
@@ -162,9 +182,11 @@ export function Dashboard() {
               </div>
               <div className="stat-card">
                 <div className="stat-value text-base">
-                  {userInfo.gb_used?.toFixed(1) ?? "0"}
+                  {userInfo.gb_total
+                    ? Math.max(0, userInfo.gb_total - (userInfo.gb_used ?? 0)).toFixed(1)
+                    : "∞"}
                 </div>
-                <div className="stat-label">GB مصرفی</div>
+                <div className="stat-label">GB باقیمانده</div>
               </div>
             </div>
 
@@ -174,12 +196,19 @@ export function Dashboard() {
             )}
 
             {/* Registered IP */}
-            <div className="flex items-center justify-between pt-1">
-              <span className="text-xs" style={{ color: "var(--muted)" }}>آی‌پی ثبت‌شده</span>
-              <span className="font-mono text-xs"
-                    style={{ color: userInfo.ip ? "var(--text)" : "var(--danger)" }}>
-                {userInfo.ip || "ثبت نشده"}
-              </span>
+            <div className="flex items-center justify-between gap-2 pt-1">
+              <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>آی‌پی ثبت‌شده</span>
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="font-mono text-xs truncate"
+                      style={{ color: userInfo.ip ? "var(--text)" : "var(--danger)" }}>
+                  {userInfo.ip || "ثبت نشده"}
+                </span>
+                <button onClick={handleUpdateIp} title="به‌روزرسانی آی‌پی در پنل"
+                        className="text-xs px-2 py-1 rounded-lg shrink-0 transition-colors"
+                        style={{ color: "var(--p)", border: "1px solid var(--border)" }}>
+                  ⟳
+                </button>
+              </div>
             </div>
 
             {/* Expiry */}
@@ -217,7 +246,7 @@ export function Dashboard() {
       <div className="shrink-0 text-center py-2"
            style={{ borderTop: "1px solid var(--border)" }}>
         <span className="text-[10px]" style={{ color: "var(--muted)" }}>
-          PeDitXCDN v0.3.6
+          PeDitXCDN v0.3.7
         </span>
       </div>
     </div>

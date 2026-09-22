@@ -3,12 +3,16 @@ use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::Mutex;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Global shutdown sender — signals proxy tasks to stop.
+/// `watch` (not mpsc) so every listener can hold its own receiver and
+/// `send` is callable from a synchronous context. mpsc needed an await,
+/// so the sync `stop_dns_proxy` could only drop the sender and the TCP
+/// accept loop — which never watched it at all — kept port 53 bound.
 /// Wrapped in Mutex<Option<>> so it can be replaced on each start.
-static SHUTDOWN: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
+static SHUTDOWN: Mutex<Option<watch::Sender<bool>>> = Mutex::new(None);
 
 // ─── System DNS helpers (netsh) ───────────────────────────────────────
 
@@ -158,8 +162,54 @@ async fn forward_tcp_raw(packet: &[u8], relay: SocketAddr) -> Result<Vec<u8>, St
     Ok(resp)
 }
 
+/// Name the process holding port 53 — the old message blamed the DNS Client
+/// service, which almost never actually owns the port.
+fn port_holder(proto: &str) -> Option<String> {
+    let out = Command::new("netstat")
+        .args(["-ano", "-p", &proto.to_ascii_lowercase()])
+        .output()
+        .ok()?;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 4 || !f[1].ends_with(":53") {
+            continue;
+        }
+        let pid = f.last()?.parse::<u32>().ok()?;
+        let t = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output()
+            .ok()?;
+        let name = String::from_utf8_lossy(&t.stdout)
+            .lines()
+            .next()?
+            .split('"')
+            .nth(1)?
+            .to_string();
+        if name.is_empty() || name.contains("No tasks") {
+            return None;
+        }
+        return Some(format!("{name} (PID {pid})"));
+    }
+    None
+}
+
+fn bind_error(proto: &str, e: std::io::Error) -> String {
+    if e.kind() != std::io::ErrorKind::AddrInUse {
+        return format!("Failed to bind {proto} port 53: {e}");
+    }
+    let holder = port_holder(proto)
+        .or_else(|| port_holder(if proto == "TCP" { "UDP" } else { "TCP" }));
+    match holder {
+        Some(who) => format!(
+            "پورت 53 توسط «{who}» اشغال است. آن برنامه را ببندید یا سرویس‌اش را متوقف کنید، بعد دوباره اتصال بزنید."
+        ),
+        None => "پورت 53 اشغال است. نرم‌افزار DNS دیگری (Docker، AdGuard، Acrylic، ICS) را ببندید و دوباره امتحان کنید."
+            .to_string(),
+    }
+}
+
 /// Start the DNS proxy as a background tokio task.
-/// Binds UDP+TCP on port 53, forwards to relay_ip:53.
+/// Binds UDP+TCP on 127.0.0.1:53, forwards to relay_ip:53.
 /// Changes system DNS to 127.0.0.1.
 async fn start_proxy(relay_ip: String) -> Result<(), String> {
     // Stop any existing proxy first
@@ -169,51 +219,55 @@ async fn start_proxy(relay_ip: String) -> Result<(), String> {
         .parse()
         .map_err(|_| format!("invalid relay IP: {}", relay_ip))?;
 
-    let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // Bind UDP socket
-    let udp = UdpSocket::bind("0.0.0.0:53")
+    // Loopback only: system DNS points at 127.0.0.1, so we never need
+    // 0.0.0.0 — which both collides with ICS/Docker binds on other local
+    // addresses and exposes an open resolver to the whole LAN.
+    let udp = UdpSocket::bind("127.0.0.1:53")
         .await
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AddrInUse {
-                "Port 53 is in use. Stop the Windows DNS Client service or close other DNS software.".to_string()
-            } else {
-                format!("Failed to bind UDP port 53: {e}")
-            }
-        })?;
+        .map_err(|e| bind_error("UDP", e))?;
     let udp = std::sync::Arc::new(udp);
 
-    // Bind TCP listener
-    let tcp = TcpListener::bind("0.0.0.0:53")
+    let tcp = TcpListener::bind("127.0.0.1:53")
         .await
-        .map_err(|e| format!("Failed to bind TCP port 53: {e}"))?;
+        .map_err(|e| bind_error("TCP", e))?;
 
     // Change system DNS to localhost
     set_system_dns("127.0.0.1")?;
 
-    eprintln!("[PeDitXCDN] DNS proxy started: 0.0.0.0:53 -> {}:53", relay_ip);
+    eprintln!("[PeDitXCDN] DNS proxy started: 127.0.0.1:53 -> {}:53", relay_ip);
 
     // Store shutdown sender
     *SHUTDOWN.lock().unwrap() = Some(shutdown_tx);
 
-    // Spawn TCP accept loop
+    // Spawn TCP accept loop — must watch shutdown too, otherwise it keeps
+    // port 53 bound after disconnect and the next connect fails.
     let tcp_relay = relay_addr;
+    let mut tcp_stop = shutdown_rx.clone();
     tokio::spawn(async move {
         loop {
-            match tcp.accept().await {
-                Ok((stream, _)) => {
-                    let relay = tcp_relay;
-                    tokio::spawn(async move {
-                        handle_tcp(stream, relay).await;
-                    });
+            tokio::select! {
+                accepted = tcp.accept() => {
+                    match accepted {
+                        Ok((stream, _)) => {
+                            let relay = tcp_relay;
+                            tokio::spawn(async move { handle_tcp(stream, relay).await; });
+                        }
+                        Err(e) => {
+                            eprintln!("[PeDitXCDN] TCP accept error: {e}");
+                            break;
+                        }
+                    }
                 }
-                Err(_) => break,
+                _ = tcp_stop.changed() => break,
             }
         }
     });
 
     // Spawn UDP forwarding loop (non-blocking — returns immediately)
     let udp_clone = udp.clone();
+    let mut udp_stop = shutdown_rx;
     tokio::spawn(async move {
         let mut recv_buf = [0u8; 4096];
         loop {
@@ -234,7 +288,7 @@ async fn start_proxy(relay_ip: String) -> Result<(), String> {
                         });
                     }
                 }
-                _ = shutdown_rx.recv() => {
+                _ = udp_stop.changed() => {
                     eprintln!("[PeDitXCDN] DNS proxy stopped");
                     break;
                 }
@@ -247,10 +301,10 @@ async fn start_proxy(relay_ip: String) -> Result<(), String> {
 
 /// Stop the proxy and restore system DNS.
 async fn stop_proxy_inner() {
-    // Send shutdown signal
+    // Send shutdown signal (sync — watch::Sender::send needs no await)
     let tx = SHUTDOWN.lock().unwrap().take();
     if let Some(tx) = tx {
-        let _ = tx.send(()).await;
+        let _ = tx.send(true);
         // Wait briefly for tasks to exit
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
@@ -270,8 +324,11 @@ pub fn start_dns_proxy(relay_ip: &str) -> Result<(), String> {
 
 /// Stop the DNS proxy + restore system DNS (non-blocking, safe from any thread).
 pub fn stop_dns_proxy() {
-    // Send shutdown signal (just drop the sender — tasks will notice)
-    let _ = SHUTDOWN.lock().unwrap().take();
+    // Send the shutdown signal instead of just dropping the sender —
+    // dropping stopped the UDP loop but left the TCP listener bound.
+    if let Some(tx) = SHUTDOWN.lock().unwrap().take() {
+        let _ = tx.send(true);
+    }
     // Restore DNS directly (sync, no tokio needed)
     let _ = restore_system_dns();
     eprintln!("[PeDitXCDN] DNS proxy stopped, system DNS restored to DHCP");

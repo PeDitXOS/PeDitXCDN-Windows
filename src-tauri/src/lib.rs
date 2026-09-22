@@ -193,7 +193,7 @@ fn ensure_admin() {
 
     // Try to bind port 53 — if it works, we have admin
     use std::net::UdpSocket;
-    if UdpSocket::bind("0.0.0.0:53").is_ok() {
+    if UdpSocket::bind("127.0.0.1:53").is_ok() {
         return;
     }
 
