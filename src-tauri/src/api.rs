@@ -2,6 +2,28 @@ use crate::types::{LoginResponse, PlansResponse, SimpleResponse, UserInfo};
 use reqwest::Client;
 use std::sync::OnceLock;
 
+/// Log a message to %APPDATA%/PeDitXCDN/debug.log
+pub fn log_to_file(msg: &str) {
+    if let Some(dir) = dirs::data_dir() {
+        let log_dir = dir.join("PeDitXCDN");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_dir.join("debug.log"))
+            .unwrap();
+        use std::io::Write;
+        let _ = writeln!(f, "[{}] {}", chrono_wrapper(), msg);
+    }
+}
+
+fn chrono_wrapper() -> String {
+    format!("{:?}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs())
+}
+
 fn http_client() -> &'static Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -23,15 +45,21 @@ pub async fn login(
     password: &str,
 ) -> Result<LoginResponse, String> {
     let url = format!("{}/login", panel_url);
-    let resp = http_client()
+    log_to_file(&format!("LOGIN: url={}, user={}", url, username));
+    let resp = match http_client()
         .post(&url)
         .form(&[("username", username), ("password", password)])
         .send()
-        .await
-        .map_err(|e| format!("login request failed: {e}"))?;
+        .await {
+            Ok(r) => r,
+            Err(e) => {
+                log_to_file(&format!("LOGIN ERROR: {}", e));
+                return Err(format!("login request failed: {e}"));
+            }
+        };
 
     let status = resp.status();
-    eprintln!("[PeDitXCDN] Login response status: {}", status);
+    log_to_file(&format!("LOGIN STATUS: {}", status));
     let location = resp
         .headers()
         .get("location")
@@ -40,6 +68,7 @@ pub async fn login(
         .to_string();
 
     if status == 303 || status == 302 {
+        log_to_file(&format!("LOGIN REDIRECT: location={}", location));
         // Decode redirect message
         if let Some(query) = location.split('?').nth(1) {
             for part in query.split('&') {
@@ -65,7 +94,7 @@ pub async fn login(
     } else if status == 200 {
         // Panel returned 200 directly (some panels don't redirect on login)
         let body = resp.text().await.unwrap_or_default();
-        eprintln!("[PeDitXCDN] Login 200 body (first 500): {}", &body[..body.len().min(500)]);
+        log_to_file(&format!("LOGIN 200 body (500): {}", &body[..body.len().min(500)]));
         let is_error = body.contains("class=\"error\"")
             || body.contains("e=1")
             || body.contains("error")
@@ -84,6 +113,7 @@ pub async fn login(
             })
         }
     } else {
+        log_to_file(&format!("LOGIN UNEXPECTED: status={}", status));
         Ok(LoginResponse {
             ok: false,
             session: None,
