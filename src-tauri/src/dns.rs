@@ -264,14 +264,17 @@ async fn stop_proxy_inner() {
 
 /// Start the DNS proxy + change system DNS.
 pub fn start_dns_proxy(relay_ip: &str) -> Result<(), String> {
-    let rt = tokio::runtime::Handle::current();
+    let rt = tauri::async_runtime::handle();
     rt.block_on(start_proxy(relay_ip.to_string()))
 }
 
-/// Stop the DNS proxy + restore system DNS (blocking version for commands).
+/// Stop the DNS proxy + restore system DNS (non-blocking, safe from any thread).
 pub fn stop_dns_proxy() {
-    let rt = tokio::runtime::Handle::current();
-    rt.block_on(stop_proxy_inner());
+    // Send shutdown signal (just drop the sender — tasks will notice)
+    let _ = SHUTDOWN.lock().unwrap().take();
+    // Restore DNS directly (sync, no tokio needed)
+    let _ = restore_system_dns();
+    eprintln!("[PeDitXCDN] DNS proxy stopped, system DNS restored to DHCP");
 }
 
 /// Stop the DNS proxy + restore system DNS (async version for non-tokio threads).
