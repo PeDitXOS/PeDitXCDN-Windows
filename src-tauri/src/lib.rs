@@ -144,7 +144,11 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
                     let _ = win.set_focus();
                 }
             }
-            "quit" => { app.exit(0); }
+            "quit" => {
+                // Restore DNS before exiting
+                dns::stop_dns_proxy();
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -200,12 +204,14 @@ pub fn run() {
                 let handle = app.handle().clone();
                 win.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        // Spawn async stop on tokio runtime (close handler runs on main thread)
+                        // Stop DNS proxy asynchronously (close handler runs on main thread)
                         tauri::async_runtime::spawn(async {
                             dns::stop_dns_proxy_async().await;
                         });
-                        // Show window to tray
-                        let _ = handle.emit("tray-minimize", ());
+                        // Hide window to system tray
+                        if let Some(win) = handle.get_webview_window("main") {
+                            let _ = win.hide();
+                        }
                         api.prevent_close();
                     }
                 });
