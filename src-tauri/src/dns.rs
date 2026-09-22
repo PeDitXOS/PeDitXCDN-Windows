@@ -386,6 +386,10 @@ pub fn stop_dns_proxy() {
     // dropping stopped the UDP loop but left the TCP listener bound.
     if let Some(tx) = SHUTDOWN.lock().unwrap().take() {
         let _ = tx.send(true);
+        // Give the accept/recv loops time to drop their sockets. Without
+        // this an immediate reconnect raced them and bind :53 failed with
+        // "port 53 is in use" — our own listener from a moment ago.
+        std::thread::sleep(std::time::Duration::from_millis(300));
     }
     // Restore DNS directly (sync, no tokio needed)
     let _ = restore_system_dns();

@@ -22,11 +22,11 @@ function daysFromExpires(expires?: string): number | undefined {
 }
 
 /**
- * The deployed panel always reports `days_left: 0` — it computes
- * `expires_at - now()` where `now()` returns a string, the TypeError is
- * swallowed by `except: pass`, while `expires` itself comes back as a
- * plain slice and renders fine. Until that ships fixed server-side,
- * recompute here whenever the panel's answer is unusable.
+ * Fallback for a panel that still reports `days_left: 0` next to a real
+ * expiry date (it used to compute `expires_at - now()` where `now()` is a
+ * string, and the TypeError was swallowed). Deployed 2026-09-22 on the
+ * exit server and switched to calendar days — kept so an unpatched panel
+ * degrades to a correct number instead of 0.
  */
 function withDays<T extends { days_left?: number; expires?: string }>(info: T): T {
   if (!info.days_left) {
@@ -154,12 +154,22 @@ export function Dashboard() {
     }
   };
 
+  // window.open is inert in the Tauri webview — both quick-action buttons
+  // did nothing until they went through the opener plugin.
+  const openExternal = async (url: string) => {
+    try {
+      await invoke("plugin:opener|open_url", { url });
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const openPanel = () => {
-    window.open(panelUrl || PANEL_URL_FALLBACK, "_blank");
+    void openExternal(panelUrl || PANEL_URL_FALLBACK);
   };
 
   const openBot = () => {
-    window.open(`https://t.me/${BOT_USERNAME}`, "_blank");
+    void openExternal(`https://t.me/${BOT_USERNAME}`);
   };
 
   return (
@@ -318,7 +328,7 @@ export function Dashboard() {
       <div className="shrink-0 text-center py-2"
            style={{ borderTop: "1px solid var(--border)" }}>
         <span className="text-[10px]" style={{ color: "var(--muted)" }}>
-          PeDitXCDN v0.3.11
+          PeDitX© v0.3.12
         </span>
       </div>
     </div>

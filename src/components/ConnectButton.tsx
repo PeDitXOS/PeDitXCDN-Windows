@@ -4,7 +4,7 @@ import { useAppStore } from "../store";
 export function ConnectButton() {
   const {
     connectionStatus, relayIp, setConnectionStatus,
-    setRelayIp, setDnsStatus, setError,
+    setDnsStatus, setError,
   } = useAppStore();
   const loading = connectionStatus === "connecting";
 
@@ -13,7 +13,9 @@ export function ConnectButton() {
       try {
         await invoke("disconnect");
         setConnectionStatus("disconnected");
-        setRelayIp(null);
+        // Keep relayIp: it is the resolved panel host and is what the next
+        // connect needs. Clearing it here made the Connect button a no-op
+        // ("آی‌پی رله در دسترسی نیست") for every reconnect.
         const dns = await invoke<{ configured: boolean; current_dns?: string }>("get_dns_status");
         setDnsStatus(dns as never);
       } catch (e) {
