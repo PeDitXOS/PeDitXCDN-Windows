@@ -7,7 +7,7 @@ import { QuotaBar } from "./QuotaBar";
 import { PlansList } from "./PlansList";
 
 const PANEL_URL_FALLBACK = "https://docproir.peditxcdn.ir:8443";
-const BOT_USERNAME = "PeDitXDNS_bot";
+const BOT_USERNAME = "peditxcdn_bot";
 
 /** Whole calendar days from today until a `YYYY-MM-DD` expiry date. */
 function daysFromExpires(expires?: string): number | undefined {
@@ -328,7 +328,7 @@ export function Dashboard() {
       <div className="shrink-0 text-center py-2"
            style={{ borderTop: "1px solid var(--border)" }}>
         <span className="text-[10px]" style={{ color: "var(--muted)" }}>
-          PeDitX© v0.3.12
+          PeDitX© v0.3.13
         </span>
       </div>
     </div>
