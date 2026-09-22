@@ -191,7 +191,7 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
 /// `--elevated` guard bounds it to a single relaunch.
 #[cfg(target_os = "windows")]
 fn is_elevated() -> bool {
-    std::process::Command::new("net")
+    dns::cmd("net")
         .args(["session"])
         .output()
         .map(|o| o.status.success())

@@ -16,13 +16,28 @@ static SHUTDOWN: Mutex<Option<watch::Sender<bool>>> = Mutex::new(None);
 
 // ─── System DNS helpers (netsh) ───────────────────────────────────────
 
+/// Spawn a console child without flashing a CMD window.
+/// This is a GUI-subsystem app, so Windows gives every netsh/netstat/tasklist
+/// its own console — and `get_net_speed` runs netstat once a second, which
+/// put a window in front of the desktop fast enough to make the machine
+/// unusable. CREATE_NO_WINDOW = 0x08000000.
+pub(crate) fn cmd(program: &str) -> Command {
+    let mut c = Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000);
+    }
+    c
+}
+
 /// Every connected non-loopback interface name, most likely first.
 /// More than one because the state column is localized and the guessed
 /// name may simply not exist — trying them in turn beats guessing once.
 #[cfg(target_os = "windows")]
 fn interface_candidates() -> Vec<String> {
     let mut found = Vec::new();
-    if let Ok(output) = Command::new("netsh")
+    if let Ok(output) = cmd("netsh")
         .args(["interface", "ip", "show", "interfaces"])
         .output()
     {
@@ -96,7 +111,7 @@ fn netsh_set_dns(args: &[&str], what: &str) -> Result<(), String> {
     for iface in interface_candidates() {
         let mut full = vec!["interface", "ip", "set", "dns", iface.as_str()];
         full.extend_from_slice(args);
-        let out = match Command::new("netsh").args(&full).output() {
+        let out = match cmd("netsh").args(&full).output() {
             Ok(o) => o,
             Err(e) => return Err(format!("failed to run netsh: {e}")),
         };
@@ -208,7 +223,7 @@ async fn forward_tcp_raw(packet: &[u8], relay: SocketAddr) -> Result<Vec<u8>, St
 /// Name the process holding port 53 — the old message blamed the DNS Client
 /// service, which almost never actually owns the port.
 fn port_holder(proto: &str) -> Option<String> {
-    let out = Command::new("netstat")
+    let out = cmd("netstat")
         .args(["-ano", "-p", &proto.to_ascii_lowercase()])
         .output()
         .ok()?;
@@ -218,7 +233,7 @@ fn port_holder(proto: &str) -> Option<String> {
             continue;
         }
         let pid = f.last()?.parse::<u32>().ok()?;
-        let t = Command::new("tasklist")
+        let t = cmd("tasklist")
             .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
             .output()
             .ok()?;
@@ -387,7 +402,7 @@ pub fn get_dns_status() -> Result<DnsStatus, String> {
     #[cfg(target_os = "windows")]
     {
         let iface = get_active_interface()?;
-        let output = Command::new("netsh")
+        let output = cmd("netsh")
             .args(["interface", "ip", "show", "dns", &iface])
             .output()
             .map_err(|e| format!("failed to run netsh: {e}"))?;
@@ -445,7 +460,7 @@ fn parse_netstat_e(text: &str) -> Option<(u64, u64)> {
 
 #[cfg(target_os = "windows")]
 fn read_octets() -> Result<(u64, u64), String> {
-    let out = Command::new("netstat")
+    let out = cmd("netstat")
         .args(["-e"])
         .output()
         .map_err(|e| format!("netstat -e failed: {e}"))?;
@@ -506,11 +521,11 @@ pub fn resolve_relay_ip(panel_url: &str) -> Result<String, String> {
 /// Ping the relay IP to check connectivity.
 pub fn check_relay_connection(relay_ip: &str) -> Result<bool, String> {
     let output = if cfg!(target_os = "windows") {
-        Command::new("ping")
+        cmd("ping")
             .args(["-n", "1", "-w", "1000", relay_ip])
             .output()
     } else {
-        Command::new("ping")
+        cmd("ping")
             .args(["-c", "1", "-W", "1", relay_ip])
             .output()
     };
