@@ -42,15 +42,13 @@
     "windows": {
       "nsis": {
         "installMode": "both"
+      },
+      "manifest": {
+        "path": "PeDitXCDN.exe.manifest"
       }
     }
   },
   "plugins": {
-    "opener": {
-      "openUrl": {
-        "enabled": true,
-        "browser": null
-      }
-    }
+    "opener": {}
   }
 }
