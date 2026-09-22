@@ -39,7 +39,7 @@ Section "Install App"
 
     ; Registry info
     WriteRegStr HKCU "Software\PeDitXCDN" "InstallDir" "$INSTDIR"
-    WriteRegStr HKCU "Software\PeDitXCDN" "Version" "0.3.13"
+    WriteRegStr HKCU "Software\PeDitXCDN" "Version" "0.3.14"
 SectionEnd
 
 ; === Uninstall ===

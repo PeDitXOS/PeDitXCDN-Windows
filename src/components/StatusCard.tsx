@@ -10,10 +10,12 @@ const fmtRate = (bps: number) =>
 export function StatusCard() {
   const { connectionStatus, relayIp, userInfo, error, dnsStatus } = useAppStore();
   const [rate, setRate] = useState<{ recv: number; sent: number } | null>(null);
+  const [probe, setProbe] = useState<{ ok: boolean; text: string; viaRelay: boolean } | null>(null);
 
   useEffect(() => {
     if (connectionStatus !== "connected") {
       setRate(null);
+      setProbe(null);
       return;
     }
     let alive = true;
@@ -27,6 +29,30 @@ export function StatusCard() {
     const id = setInterval(tick, 1000);
     return () => { alive = false; clearInterval(id); };
   }, [connectionStatus]);
+
+  // Resolve through 127.0.0.1:53 itself — the one thing that proves the
+  // proxy answers instead of just a status label saying "connected".
+  useEffect(() => {
+    if (connectionStatus !== "connected") return;
+    let alive = true;
+    const probeDns = async () => {
+      try {
+        const ips = await invoke<string[]>("resolve_local", { domain: "youtube.com" });
+        if (!alive) return;
+        const first = ips[0] ?? "";
+        setProbe({
+          ok: true,
+          text: first,
+          viaRelay: !!relayIp && ips.some((i) => i === relayIp),
+        });
+      } catch (e) {
+        if (alive) setProbe({ ok: false, text: String(e), viaRelay: false });
+      }
+    };
+    probeDns();
+    const id = setInterval(probeDns, 10_000);
+    return () => { alive = false; clearInterval(id); };
+  }, [connectionStatus, relayIp]);
 
   if (!connectionStatus || connectionStatus === "disconnected") return null;
 
@@ -92,6 +118,25 @@ export function StatusCard() {
           <span className="text-xs" style={{ color: "var(--muted)" }}>DNS فعلی</span>
           <span className="font-mono text-xs" style={{ color: "var(--text)" }}>
             {dnsStatus.current_dns}
+          </span>
+        </div>
+      )}
+
+      {connectionStatus === "connected" && (
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>
+            تست پروکسی محلی
+          </span>
+          <span className="font-mono text-xs truncate" style={{
+            color: !probe ? "var(--muted)"
+              : probe.ok ? (probe.viaRelay ? "var(--success)" : "var(--warn)")
+              : "var(--danger)",
+          }}>
+            {!probe
+              ? "در حال بررسی..."
+              : probe.ok
+              ? `youtube.com → ${probe.text}${probe.viaRelay ? "  ✓ از رله" : "  مستقیم"}`
+              : probe.text}
           </span>
         </div>
       )}

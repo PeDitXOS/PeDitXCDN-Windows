@@ -128,6 +128,14 @@ async fn resolve_relay_ip(panel_url: String) -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
+// spawn_blocking: spawns nslookup, must not hold the core thread.
+#[tauri::command]
+async fn resolve_local(domain: String) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || dns::resolve_local(&domain))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn logout(state: tauri::State<'_, AppState>) -> Result<(), String> {
     *state.session.lock().unwrap() = None;
@@ -323,6 +331,7 @@ pub fn run() {
             get_dns_status,
             check_relay_connection,
             resolve_relay_ip,
+            resolve_local,
             get_net_speed,
             logout,
         ])

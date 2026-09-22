@@ -522,6 +522,53 @@ pub fn resolve_relay_ip(panel_url: &str) -> Result<String, String> {
         .ok_or_else(|| format!("no IPv4 address for {host}"))
 }
 
+/// Resolve `domain` through the local proxy (127.0.0.1:53).
+/// This is the visible proof that a connection is real: a hijacked domain
+/// answers with the relay IP, a bypassed one with a public address, and no
+/// answer at all means the proxy or the relay is down.
+/// Pull answer addresses out of `nslookup` output for both platforms.
+/// The server line is 127.0.0.1 (skipped as loopback), answers may come as
+/// `Address: 1.2.3.4`, a bare `1.2.3.4` under `Addresses:`, or the `#53`
+/// authority form — so trim everything that is not part of an address.
+fn nslookup_addrs(stdout: &str, stderr: &str) -> Vec<String> {
+    let mut ips: Vec<String> = Vec::new();
+    for line in stdout.lines().chain(stderr.lines()) {
+        for tok in line.split_whitespace() {
+            let tok = tok.trim_matches(|c: char| !c.is_ascii_digit() && c != ':' && c != '.');
+            if let Ok(ip) = tok.parse::<std::net::IpAddr>() {
+                if ip.is_loopback() {
+                    continue;
+                }
+                let s = ip.to_string();
+                if !ips.contains(&s) {
+                    ips.push(s);
+                }
+            }
+        }
+    }
+    ips
+}
+
+pub fn resolve_local(domain: &str) -> Result<Vec<String>, String> {
+    let out = cmd("nslookup")
+        .args([domain, "127.0.0.1"])
+        .output()
+        .map_err(|e| format!("nslookup failed: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let ips = nslookup_addrs(&stdout, &stderr);
+
+    if ips.is_empty() {
+        Err(format!(
+            "پاسخی از پروکسی محلی نیامد: {}",
+            netsh_out(&out)
+        ))
+    } else {
+        Ok(ips)
+    }
+}
+
 /// Ping the relay IP to check connectivity.
 pub fn check_relay_connection(relay_ip: &str) -> Result<bool, String> {
     let output = if cfg!(target_os = "windows") {
