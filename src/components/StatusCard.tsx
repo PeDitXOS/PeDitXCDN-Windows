@@ -44,7 +44,9 @@ export function StatusCard() {
     const probeDns = async () => {
       try {
         const r = await invoke<{ a: string[]; aaaa: string[]; ms: number }>(
-          "resolve_local", { domain: "youtube.com" },
+          // relayIp lets the backend split "our proxy is down" from "the
+          // network eats port 53" — otherwise both read as a bare timeout.
+          "resolve_local", { domain: "youtube.com", relayIp },
         );
         if (!alive) return;
         setProbe({

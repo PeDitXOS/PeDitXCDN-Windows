@@ -106,14 +106,21 @@ async fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+// async + spawn_blocking: get_dns_status runs netsh twice (v4 and v6) and
+// check_relay_connection runs a ping with a 1s wait — both were sync commands,
+// i.e. sitting on the core thread whenever the webview asked for status.
 #[tauri::command]
-fn get_dns_status() -> Result<DnsStatus, String> {
-    dns::get_dns_status()
+async fn get_dns_status() -> Result<DnsStatus, String> {
+    tokio::task::spawn_blocking(dns::get_dns_status)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn check_relay_connection(relay_ip: String) -> Result<bool, String> {
-    dns::check_relay_connection(&relay_ip)
+async fn check_relay_connection(relay_ip: String) -> Result<bool, String> {
+    tokio::task::spawn_blocking(move || dns::check_relay_connection(&relay_ip))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 // spawn_blocking: spawns netstat, must not hold the core thread.
@@ -131,10 +138,11 @@ async fn resolve_relay_ip(panel_url: String) -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
-// spawn_blocking: opens a socket and waits up to 2s, must not hold the core thread.
+// spawn_blocking: opens a socket and waits up to 2s (twice on failure —
+// the relay hop is probed too), must not hold the core thread.
 #[tauri::command]
-async fn resolve_local(domain: String) -> Result<LocalResolve, String> {
-    tokio::task::spawn_blocking(move || dns::resolve_local(&domain))
+async fn resolve_local(domain: String, relay_ip: Option<String>) -> Result<LocalResolve, String> {
+    tokio::task::spawn_blocking(move || dns::resolve_local(&domain, relay_ip.as_deref()))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -291,18 +299,24 @@ pub fn run() {
         })
         .setup(|app| {
             // Crash recovery: if DNS is stuck on the proxy from a previous
-            // crash (or a killed "Not responding" window), restore it directly
-            // — can't use stop_dns_proxy here, there is no tokio runtime yet.
-            // Both stacks: a leftover ::1 breaks resolution just as hard as a
+            // crash (or a killed "Not responding" window), restore it.
+            // Off the main thread — the restore is a multi-interface netsh
+            // loop plus flushdns, and running it inline held setup() (and so
+            // the first paint) for seconds on exactly the machines that need
+            // it. Both stacks: a leftover ::1 breaks resolution as hard as a
             // leftover 127.0.0.1, and get_dns_status used to report neither.
-            if let Ok(status) = dns::get_dns_status() {
-                if status.current_dns.as_deref() == Some("127.0.0.1")
-                    || status.ipv6_dns.as_deref() == Some("::1")
-                {
-                    eprintln!("[PeDitXCDN] Found stale proxy DNS, restoring DHCP...");
-                    dns::restore_system_dns();
+            std::thread::spawn(|| {
+                if let Ok(status) = dns::get_dns_status() {
+                    if status.current_dns.as_deref() == Some("127.0.0.1")
+                        || status.ipv6_dns.as_deref() == Some("::1")
+                    {
+                        eprintln!("[PeDitXCDN] Found stale proxy DNS, restoring DHCP...");
+                        api::log_to_file("STALE DNS found at startup, restoring DHCP");
+                        let _ = dns::restore_system_dns();
+                        api::log_to_file("STALE DNS restored");
+                    }
                 }
-            }
+            });
 
             // Create tray - non-fatal if it fails
             if let Err(e) = create_tray(app.handle()) {
@@ -314,11 +328,12 @@ pub fn run() {
                 let handle = app.handle().clone();
                 win.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        // Stop DNS proxy asynchronously (close handler runs on main thread)
-                        tauri::async_runtime::spawn(async {
-                            dns::stop_dns_proxy_async().await;
-                        });
-                        // Hide window to system tray
+                        // Hide only — the connection keeps running. Stopping the
+                        // proxy here meant closing the window silently dropped
+                        // the tunnel: DNS went back to the ISP (YouTube dead)
+                        // while the still-alive webview kept showing «متصل» and
+                        // the probe timed out. Stop happens on Disconnect,
+                        // Logout and tray Quit, which are the explicit acts.
                         if let Some(win) = handle.get_webview_window("main") {
                             let _ = win.hide();
                         }

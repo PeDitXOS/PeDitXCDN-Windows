@@ -304,6 +304,71 @@ async fn forward_udp(packet: &[u8], relay: SocketAddr) -> Result<Vec<u8>, String
     Ok(buf)
 }
 
+/// How sick the relay's UDP path looks. Non-zero means UDP is losing (or
+/// failing) — a middlebox dropping UDP/53 does exactly this — so the next
+/// query starts the TCP attempt in flight instead of waiting out the stagger.
+/// A UDP win resets it: that is the healthy path, no extra handshake.
+static UDP_SICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// UDP first, TCP as soon as UDP looks dead — first answer wins.
+/// A healthy path never pays for the TCP handshake; a path that swallows
+/// UDP/53 still resolves (the probe only waits 2s, so TCP has to be in
+/// flight early, not as a retry after the 3s UDP timeout).
+async fn forward_best(packet: &[u8], relay: SocketAddr) -> Result<Vec<u8>, String> {
+    use std::sync::atomic::Ordering;
+    let staggered = UDP_SICK.load(Ordering::Relaxed) == 0;
+    let mut udp = Box::pin(forward_udp(packet, relay));
+    let mut tcp = Box::pin(async move {
+        if staggered {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+        forward_tcp_raw(packet, relay).await
+    });
+
+    let mut first_err: Option<String> = None;
+    let mut udp_done = false;
+    let mut tcp_done = false;
+    while !udp_done || !tcp_done {
+        tokio::select! {
+            r = &mut udp, if !udp_done => {
+                udp_done = true;
+                match r {
+                    Ok(v) => {
+                        UDP_SICK.store(0, Ordering::Relaxed);
+                        return Ok(v);
+                    }
+                    Err(e) => {
+                        UDP_SICK.fetch_add(1, Ordering::Relaxed);
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
+                    }
+                }
+            }
+            r = &mut tcp, if !tcp_done => {
+                tcp_done = true;
+                match r {
+                    Ok(v) => {
+                        // TCP beat UDP — the UDP leg is what is broken, and
+                        // counting it only on a UDP *error* never fires: a
+                        // silently dropped UDP query is still in flight when
+                        // TCP answers, so the path would stay "healthy" and
+                        // pay the stagger forever.
+                        UDP_SICK.fetch_add(1, Ordering::Relaxed);
+                        return Ok(v);
+                    }
+                    Err(e) => {
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Err(first_err.unwrap_or_else(|| "no upstream answer".to_string()))
+}
+
 /// Handle one TCP DNS connection: read length-prefixed message, forward, reply.
 async fn handle_tcp(mut client: TcpStream, relay: SocketAddr) {
     let mut len_buf = [0u8; 2];
@@ -440,12 +505,17 @@ fn spawn_udp_loop(sock: std::sync::Arc<UdpSocket>, relay: SocketAddr, mut stop: 
                                 let _ = s.send_to(&resp, peer).await;
                                 return;
                             }
-                            match forward_udp(&packet, relay).await {
+                            match forward_best(&packet, relay).await {
                                 Ok(response) => {
                                     let _ = s.send_to(&response, peer).await;
                                 }
                                 Err(e) => {
-                                    eprintln!("[PeDitXCDN] UDP forward error: {e}");
+                                    // eprintln vanishes for a GUI child — this
+                                    // line is what tells us *which* hop died.
+                                    crate::api::log_to_file(&format!(
+                                        "FORWARD FAIL {relay} ({peer}): {e}"
+                                    ));
+                                    eprintln!("[PeDitXCDN] forward error: {e}");
                                 }
                             }
                         });
@@ -503,6 +573,11 @@ async fn start_proxy(relay_ip: String) -> Result<(), String> {
         relay_ip
     );
 
+    crate::api::log_to_file(&format!(
+        "PROXY START 127.0.0.1:53{} -> {relay_ip}:53",
+        if proxy_v6 { " + [::1]:53" } else { "" }
+    ));
+
     // Store shutdown sender
     *SHUTDOWN.lock().unwrap() = Some(shutdown_tx);
 
@@ -522,16 +597,39 @@ async fn start_proxy(relay_ip: String) -> Result<(), String> {
 async fn stop_proxy_inner() {
     // Send shutdown signal (sync — watch::Sender::send needs no await)
     let tx = SHUTDOWN.lock().unwrap().take();
-    if let Some(tx) = tx {
+    let had_proxy = tx.is_some();
+    if let Some(tx) = &tx {
         let _ = tx.send(true);
         // Wait briefly for tasks to exit
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
 
-    // Restore system DNS — same reason as in start_proxy: blocking netsh
-    // must not sit on an async worker.
-    let _ = tokio::task::spawn_blocking(restore_system_dns).await;
-    eprintln!("[PeDitXCDN] System DNS restored to DHCP");
+    // Restore only when there is something to restore from. This runs as the
+    // *first* step of every connect, and unconditionally it meant a full
+    // multi-interface netsh loop (v4 + v6 + flushdns, ~0.5s each) before the
+    // port was even bound — the "Connect takes forever" press. First connect
+    // of a session has no proxy and DNS already points at the ISP.
+    // A crash leftover *is* still caught: the status check below sees 127.0.0.1.
+    let need = had_proxy || dns_points_at_proxy().await;
+    if need {
+        // Restore system DNS — same reason as in start_proxy: blocking netsh
+        // must not sit on an async worker.
+        let _ = tokio::task::spawn_blocking(restore_system_dns).await;
+        eprintln!("[PeDitXCDN] System DNS restored to DHCP");
+    }
+}
+
+/// True when the system is pointed at our own (now possibly dead) proxy.
+async fn dns_points_at_proxy() -> bool {
+    let st = tokio::task::spawn_blocking(get_dns_status)
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+    matches!(
+        st,
+        Some(s) if s.current_dns.as_deref() == Some("127.0.0.1")
+            || s.ipv6_dns.as_deref() == Some("::1")
+    )
 }
 
 // ─── Public API (called from Tauri commands) ──────────────────────────
@@ -824,12 +922,23 @@ fn query_addrs(server: &str, domain: &str, qtype: u16) -> Result<Vec<String>, St
 /// with the relay IP, a bypassed one with a public address, a dead proxy
 /// times out. Replaces `nslookup`, whose reverse lookup of 127.0.0.1 and
 /// localized output could not tell "no answer" from "answer we mis-parsed".
-pub fn resolve_local(domain: &str) -> Result<LocalResolve, String> {
+/// `relay` is optional: with it, a failed local query is retried straight
+/// against the relay so the UI can say *which* hop is dead — "our proxy is
+/// down" and "the network eats port 53" look identical otherwise, and the
+/// next support round-trip costs an installer.
+pub fn resolve_local(domain: &str, relay: Option<&str>) -> Result<LocalResolve, String> {
     let t0 = std::time::Instant::now();
-    let a = query_addrs("127.0.0.1:53", domain, QTYPE_A)?;
-    if a.is_empty() {
-        return Err("پاسخ A از پروکسی محلی برنگشت".to_string());
-    }
+    let a = match query_addrs("127.0.0.1:53", domain, QTYPE_A) {
+        Ok(a) if !a.is_empty() => a,
+        Ok(_) => {
+            return Err(hop_diagnosis(
+                "پاسخ A از پروکسی محلی برنگشت",
+                domain,
+                relay,
+            ))
+        }
+        Err(e) => return Err(hop_diagnosis(&e, domain, relay)),
+    };
     // Empty AAAA is the expected result while the proxy strips it
     // (nodata_aaaa) — the UI renders that as «مسدود».
     let aaaa = query_addrs("127.0.0.1:53", domain, QTYPE_AAAA).unwrap_or_default();
@@ -838,6 +947,28 @@ pub fn resolve_local(domain: &str) -> Result<LocalResolve, String> {
         aaaa,
         ms: t0.elapsed().as_millis() as u64,
     })
+}
+
+/// Split "local proxy silent" into the two cases that need different fixes.
+fn hop_diagnosis(proxy_err: &str, domain: &str, relay: Option<&str>) -> String {
+    crate::api::log_to_file(&format!("PROBE FAIL local ({domain}): {proxy_err}"));
+    let Some(relay) = relay else {
+        return proxy_err.to_string();
+    };
+    let addr = format!("{relay}:53");
+    match query_addrs(&addr, domain, QTYPE_A) {
+        Ok(a) if !a.is_empty() => {
+            crate::api::log_to_file(&format!("PROBE relay OK {addr}: {:?}", a));
+            format!("رله {relay} سالم است؛ پروکسی محلی پاسخ نداد")
+        }
+        other => {
+            crate::api::log_to_file(&format!(
+                "PROBE relay {addr}: {}",
+                other.err().unwrap_or_else(|| "empty A".to_string())
+            ));
+            format!("رله {relay} هم بی‌جواب — پورت 53 بسته است")
+        }
+    }
 }
 
 /// Ping the relay IP to check connectivity.
