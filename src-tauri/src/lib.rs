@@ -196,12 +196,13 @@ fn ensure_admin() {
     // Append --elevated arg so we don't loop
     let cmd_line = format!("\"{}\" --elevated\0", path_str);
     let cmd: Vec<u16> = cmd_line.encode_utf16().collect();
+    let path_w: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
 
     unsafe {
         windows_sys::Win32::UI::Shell::ShellExecuteW(
             std::ptr::null_mut(),
             operation.as_ptr(),
-            path.as_ptr(),
+            path_w.as_ptr(),
             cmd.as_ptr(),
             std::ptr::null(),
             windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
