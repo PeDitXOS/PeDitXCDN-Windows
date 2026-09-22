@@ -64,7 +64,7 @@ fn set_system_dns(_dns_ip: &str) -> Result<(), String> {
 
 /// Restore system DNS to DHCP (automatic).
 #[cfg(target_os = "windows")]
-fn restore_system_dns() -> Result<(), String> {
+pub fn restore_system_dns() -> Result<(), String> {
     let iface = get_active_interface()?;
     let status = Command::new("netsh")
         .args(["interface", "ip", "set", "dns", &iface, "dhcp"])
@@ -79,7 +79,7 @@ fn restore_system_dns() -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn restore_system_dns() -> Result<(), String> {
+pub fn restore_system_dns() -> Result<(), String> {
     Ok(())
 }
 

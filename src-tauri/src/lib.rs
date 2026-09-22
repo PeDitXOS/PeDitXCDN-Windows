@@ -132,6 +132,7 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
     ])?;
 
     let _tray = TrayIconBuilder::new()
+        .id("main-tray")
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&menu)
         .tooltip("PeDitXCDN")
@@ -249,17 +250,20 @@ pub fn run() {
             panel_url: Mutex::new(None),
         })
         .setup(|app| {
-            // Crash recovery: if DNS is stuck at 127.0.0.1 from a previous crash, restore it
+            // Crash recovery: if DNS is stuck at 127.0.0.1 from a previous crash,
+            // restore it directly (can't use stop_dns_proxy here — no tokio runtime yet)
             if let Ok(status) = dns::get_dns_status() {
                 if status.current_dns.as_deref() == Some("127.0.0.1") {
                     eprintln!("[PeDitXCDN] Found stale proxy DNS, restoring DHCP...");
-                    let _ = dns::stop_dns_proxy();
+                    dns::restore_system_dns();
                 }
             }
 
-            // Create tray - non-fatal if it fails
-            if let Err(e) = create_tray(app.handle()) {
-                eprintln!("Warning: tray icon failed: {e}");
+            // Create tray only if not already present (avoid duplicate icons after crash)
+            if app.tray_by_id("main-tray").is_none() {
+                if let Err(e) = create_tray(app.handle()) {
+                    eprintln!("Warning: tray icon failed: {e}");
+                }
             }
 
             // Hide to tray on close instead of quitting + cleanup
