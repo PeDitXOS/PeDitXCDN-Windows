@@ -8,7 +8,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager,
 };
-use types::{DnsStatus, LoginResponse, PlansResponse, SimpleResponse, UserInfo};
+use types::{DnsStatus, LocalResolve, LoginResponse, PlansResponse, SimpleResponse, UserInfo};
 
 struct AppState {
     connected: Mutex<bool>,
@@ -128,9 +128,9 @@ async fn resolve_relay_ip(panel_url: String) -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
-// spawn_blocking: spawns nslookup, must not hold the core thread.
+// spawn_blocking: opens a socket and waits up to 2s, must not hold the core thread.
 #[tauri::command]
-async fn resolve_local(domain: String) -> Result<Vec<String>, String> {
+async fn resolve_local(domain: String) -> Result<LocalResolve, String> {
     tokio::task::spawn_blocking(move || dns::resolve_local(&domain))
         .await
         .map_err(|e| e.to_string())?

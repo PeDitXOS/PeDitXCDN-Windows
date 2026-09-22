@@ -65,3 +65,13 @@ pub struct DnsStatus {
     pub interface: String,
     pub is_relay_dns: bool,
 }
+
+/// Result of probing the local proxy: both record types are reported, not
+/// just "some address", because A is the hijacked one and a live AAAA means
+/// the browser can still leave the tunnel over IPv6.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalResolve {
+    pub a: Vec<String>,
+    pub aaaa: Vec<String>,
+    pub ms: u64,
+}

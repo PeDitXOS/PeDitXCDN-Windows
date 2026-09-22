@@ -10,7 +10,11 @@ const fmtRate = (bps: number) =>
 export function StatusCard() {
   const { connectionStatus, relayIp, userInfo, error, dnsStatus } = useAppStore();
   const [rate, setRate] = useState<{ recv: number; sent: number } | null>(null);
-  const [probe, setProbe] = useState<{ ok: boolean; text: string; viaRelay: boolean } | null>(null);
+  const [probe, setProbe] = useState<
+    | { kind: "ok"; a: string; viaRelay: boolean; aaaa: string; ms: number }
+    | { kind: "err"; text: string }
+    | null
+  >(null);
 
   useEffect(() => {
     if (connectionStatus !== "connected") {
@@ -32,21 +36,26 @@ export function StatusCard() {
 
   // Resolve through 127.0.0.1:53 itself — the one thing that proves the
   // proxy answers instead of just a status label saying "connected".
+  // A = the record the relay hijacks; a live AAAA would let the browser
+  // leave the tunnel over IPv6, so both are shown separately.
   useEffect(() => {
     if (connectionStatus !== "connected") return;
     let alive = true;
     const probeDns = async () => {
       try {
-        const ips = await invoke<string[]>("resolve_local", { domain: "youtube.com" });
+        const r = await invoke<{ a: string[]; aaaa: string[]; ms: number }>(
+          "resolve_local", { domain: "youtube.com" },
+        );
         if (!alive) return;
-        const first = ips[0] ?? "";
         setProbe({
-          ok: true,
-          text: first,
-          viaRelay: !!relayIp && ips.some((i) => i === relayIp),
+          kind: "ok",
+          a: r.a[0] ?? "—",
+          viaRelay: !!relayIp && r.a.some((i) => i === relayIp),
+          aaaa: r.aaaa[0] ?? "",
+          ms: r.ms,
         });
       } catch (e) {
-        if (alive) setProbe({ ok: false, text: String(e), viaRelay: false });
+        if (alive) setProbe({ kind: "err", text: String(e) });
       }
     };
     probeDns();
@@ -123,21 +132,37 @@ export function StatusCard() {
       )}
 
       {connectionStatus === "connected" && (
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>
-            تست پروکسی محلی
-          </span>
-          <span className="font-mono text-xs truncate" style={{
-            color: !probe ? "var(--muted)"
-              : probe.ok ? (probe.viaRelay ? "var(--success)" : "var(--warn)")
-              : "var(--danger)",
-          }}>
-            {!probe
-              ? "در حال بررسی..."
-              : probe.ok
-              ? `youtube.com → ${probe.text}${probe.viaRelay ? "  ✓ از رله" : "  مستقیم"}`
-              : probe.text}
-          </span>
+        <div className="space-y-1 pt-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>
+              تست DNS محلی (A)
+            </span>
+            <span className="font-mono text-xs truncate" style={{
+              color: !probe ? "var(--muted)"
+                : probe.kind === "err" ? "var(--danger)"
+                : probe.viaRelay ? "var(--success)" : "var(--warn)",
+            }}>
+              {!probe
+                ? "در حال بررسی..."
+                : probe.kind === "err"
+                ? probe.text
+                : `youtube.com → ${probe.a}${probe.viaRelay ? "  ✓ از رله" : "  ⚠ مستقیم"} (${probe.ms}ms)`}
+            </span>
+          </div>
+          {probe?.kind === "ok" && (
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>
+                IPv6 (AAAA)
+              </span>
+              <span className="font-mono text-xs truncate" style={{
+                color: probe.aaaa ? "var(--warn)" : "var(--success)",
+              }}>
+                {probe.aaaa
+                  ? `${probe.aaaa}  ⚠ مستقیم (از تونل خارج می‌شود)`
+                  : "مسدود ✓  (اجبار IPv4)"}
+              </span>
+            </div>
+          )}
         </div>
       )}
 

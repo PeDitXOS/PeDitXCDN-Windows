@@ -1,4 +1,4 @@
-use crate::types::DnsStatus;
+use crate::types::{DnsStatus, LocalResolve};
 use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::Mutex;
@@ -103,11 +103,15 @@ fn netsh_out(out: &std::process::Output) -> String {
     }
 }
 
-/// Run `netsh ... set dns <iface> ...` against every candidate interface
-/// until one accepts.
+/// Run `netsh ... set dns <iface> ...` against **every** candidate interface.
+/// Stopping at the first success left the rest on the ISP's resolver, and
+/// Windows asks all of them at once (Smart Multi-Homed Name Resolution) —
+/// the ISP answers in ~10 ms, our relay path in ~240 ms, so the ISP's
+/// blocked answer always won the race. At least one must accept.
 #[cfg(target_os = "windows")]
 fn netsh_set_dns(args: &[&str], what: &str) -> Result<(), String> {
     let mut errs = Vec::new();
+    let mut ok = 0;
     for iface in interface_candidates() {
         let mut full = vec!["interface", "ip", "set", "dns", iface.as_str()];
         full.extend_from_slice(args);
@@ -116,33 +120,159 @@ fn netsh_set_dns(args: &[&str], what: &str) -> Result<(), String> {
             Err(e) => return Err(format!("failed to run netsh: {e}")),
         };
         if out.status.success() {
-            return Ok(());
+            ok += 1;
+        } else {
+            errs.push(format!("{iface}: {}", netsh_out(&out)));
         }
-        errs.push(format!("{iface}: {}", netsh_out(&out)));
     }
-    Err(format!("netsh {what} failed -> {}", errs.join(" | ")))
+    if ok > 0 {
+        Ok(())
+    } else {
+        Err(format!("netsh {what} failed -> {}", errs.join(" | ")))
+    }
+}
+
+/// Windows' DNS Client keeps answering from cache for minutes. Without a
+/// flush the pre-connect (ISP) result keeps being served after we repoint DNS.
+#[cfg(target_os = "windows")]
+fn flush_dns_cache() {
+    let _ = cmd("ipconfig").args(["/flushdns"]).output();
+}
+
+/// The IPv6 resolvers on the same interface are a second path straight
+/// around the proxy (SMHNR races them too). Point them at our own [::1]:53.
+/// Non-fatal: a failed set just leaves IPv6 unproxied, which the AAAA probe
+/// then shows as «مستقیم».
+#[cfg(target_os = "windows")]
+fn set_ipv6_dns(addr: &str) {
+    for iface in interface_candidates() {
+        match cmd("netsh")
+            .args(["interface", "ipv6", "set", "dns", &iface, "static", addr, "primary"])
+            .output()
+        {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => eprintln!("[PeDitXCDN] ipv6 set dns {iface}: {}", netsh_out(&o)),
+            Err(e) => eprintln!("[PeDitXCDN] ipv6 set dns {iface}: {e}"),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn restore_ipv6_dns() {
+    for iface in interface_candidates() {
+        // Two spellings: older builds take the source positionally, newer
+        // ones want source=. Best effort — a miss leaves ::1 pointing at a
+        // proxy that is gone, which the next start fixes anyway.
+        let attempts: [Vec<&str>; 2] = [
+            vec!["interface", "ipv6", "set", "dns", iface.as_str(), "dhcp"],
+            vec!["interface", "ipv6", "set", "dns", iface.as_str(), "source=dhcp"],
+        ];
+        let mut done = false;
+        for args in attempts {
+            if let Ok(o) = cmd("netsh").args(&args).output() {
+                if o.status.success() {
+                    done = true;
+                    break;
+                }
+            }
+        }
+        if !done {
+            eprintln!("[PeDitXCDN] ipv6 restore dns {iface} failed");
+        }
+    }
 }
 
 /// Set system DNS to a specific IP (used to point at our local proxy).
+/// `proxy_v6` — the proxy is also listening on [::1]:53, so it is safe to
+/// send the IPv6 resolvers there. When it is not, leaving the ISP's IPv6 DNS
+/// alone beats pointing it at a dead address (total breakage instead of a leak).
 #[cfg(target_os = "windows")]
-fn set_system_dns(dns_ip: &str) -> Result<(), String> {
-    netsh_set_dns(&["static", dns_ip], "set dns")
+fn set_system_dns(dns_ip: &str, proxy_v6: bool) -> Result<(), String> {
+    netsh_set_dns(&["static", dns_ip], "set dns")?;
+    if proxy_v6 {
+        set_ipv6_dns("::1");
+    } else {
+        eprintln!("[PeDitXCDN] [::1]:53 not bound — ISP IPv6 DNS left in place (leak possible)");
+    }
+    flush_dns_cache();
+    Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
-fn set_system_dns(_dns_ip: &str) -> Result<(), String> {
+fn set_system_dns(_dns_ip: &str, _proxy_v6: bool) -> Result<(), String> {
     Ok(())
 }
 
 /// Restore system DNS to DHCP (automatic).
 #[cfg(target_os = "windows")]
 pub fn restore_system_dns() -> Result<(), String> {
-    netsh_set_dns(&["dhcp"], "restore dns")
+    let r = netsh_set_dns(&["dhcp"], "restore dns");
+    restore_ipv6_dns();
+    flush_dns_cache();
+    r
 }
 
 #[cfg(not(target_os = "windows"))]
 pub fn restore_system_dns() -> Result<(), String> {
     Ok(())
+}
+
+const QTYPE_A: u16 = 1;
+const QTYPE_AAAA: u16 = 28;
+
+/// Skip a DNS name at `i` (compression pointers included) → offset after it.
+fn skip_name(msg: &[u8], mut i: usize) -> Option<usize> {
+    loop {
+        let len = *msg.get(i)? as usize;
+        if len == 0 {
+            return Some(i + 1);
+        }
+        if len & 0xC0 == 0xC0 {
+            return Some(i + 2);
+        }
+        i += len + 1;
+    }
+}
+
+/// Offset just past the single question: name + qtype + qclass.
+fn question_end(msg: &[u8]) -> Option<usize> {
+    let end = skip_name(msg, 12)?;
+    if end + 4 > msg.len() {
+        None
+    } else {
+        Some(end + 4)
+    }
+}
+
+fn is_aaaa_query(msg: &[u8]) -> bool {
+    if msg.len() < 12 || u16::from_be_bytes([msg[4], msg[5]]) != 1 {
+        return false;
+    }
+    match question_end(msg) {
+        Some(end) => u16::from_be_bytes([msg[end - 4], msg[end - 3]]) == QTYPE_AAAA,
+        None => false,
+    }
+}
+
+/// Local NOERROR/0-answer for an AAAA query, instead of forwarding it.
+/// dnsmasq's `address=/domain/IP` overrides the **A** record only — the
+/// relay hands the public AAAA straight back, Windows picks IPv6, and the
+/// browser leaves the tunnel for the blocked path. "No AAAA here" forces
+/// IPv4, which is the record the hijack rewrites.
+/// ponytail: disables IPv6 for every name, IPv6-only ones included.
+/// Upgrade path: forward the AAAA and rewrite its RDATA to a relay IPv6.
+fn nodata_aaaa(msg: &[u8]) -> Option<Vec<u8>> {
+    if !is_aaaa_query(msg) {
+        return None;
+    }
+    let end = question_end(msg)?;
+    let mut r = Vec::with_capacity(end);
+    r.extend_from_slice(&msg[0..2]);   // transaction id
+    r.push(0x80 | (msg[2] & 0x01));    // QR=1, keep the query's RD
+    r.push(0x80);                      // RA=1, RCODE=NOERROR
+    r.extend_from_slice(&[0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    r.extend_from_slice(&msg[12..end]); // echo the question
+    Some(r)
 }
 
 // ─── DNS Proxy ────────────────────────────────────────────────────────
@@ -184,9 +314,12 @@ async fn handle_tcp(mut client: TcpStream, relay: SocketAddr) {
         return;
     }
 
-    let response = match forward_tcp_raw(&msg, relay).await {
-        Ok(r) => r,
-        Err(_) => return,
+    let response = match nodata_aaaa(&msg) {
+        Some(r) => r,
+        None => match forward_tcp_raw(&msg, relay).await {
+            Ok(r) => r,
+            Err(_) => return,
+        },
     };
 
     let resp_len = (response.len() as u16).to_be_bytes();
@@ -266,9 +399,67 @@ fn bind_error(proto: &str, e: std::io::Error) -> String {
     }
 }
 
+/// TCP accept loop for one listener. Watches shutdown — otherwise it keeps
+/// port 53 bound after disconnect and the next connect fails.
+fn spawn_tcp_loop(lst: TcpListener, relay: SocketAddr, mut stop: watch::Receiver<bool>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                accepted = lst.accept() => {
+                    match accepted {
+                        Ok((stream, _)) => {
+                            tokio::spawn(async move { handle_tcp(stream, relay).await; });
+                        }
+                        Err(e) => {
+                            eprintln!("[PeDitXCDN] TCP accept error: {e}");
+                            break;
+                        }
+                    }
+                }
+                _ = stop.changed() => break,
+            }
+        }
+    });
+}
+
+/// UDP forward loop for one socket; AAAA is answered locally (nodata_aaaa).
+fn spawn_udp_loop(sock: std::sync::Arc<UdpSocket>, relay: SocketAddr, mut stop: watch::Receiver<bool>) {
+    tokio::spawn(async move {
+        let mut recv_buf = [0u8; 4096];
+        loop {
+            tokio::select! {
+                result = sock.recv_from(&mut recv_buf) => {
+                    if let Ok((n, peer)) = result {
+                        let packet = recv_buf[..n].to_vec();
+                        let s = sock.clone();
+                        tokio::spawn(async move {
+                            if let Some(resp) = nodata_aaaa(&packet) {
+                                let _ = s.send_to(&resp, peer).await;
+                                return;
+                            }
+                            match forward_udp(&packet, relay).await {
+                                Ok(response) => {
+                                    let _ = s.send_to(&response, peer).await;
+                                }
+                                Err(e) => {
+                                    eprintln!("[PeDitXCDN] UDP forward error: {e}");
+                                }
+                            }
+                        });
+                    }
+                }
+                _ = stop.changed() => {
+                    eprintln!("[PeDitXCDN] DNS proxy stopped");
+                    break;
+                }
+            }
+        }
+    });
+}
+
 /// Start the DNS proxy as a background tokio task.
-/// Binds UDP+TCP on 127.0.0.1:53, forwards to relay_ip:53.
-/// Changes system DNS to 127.0.0.1.
+/// Binds UDP+TCP on 127.0.0.1:53 and [::1]:53, forwards to relay_ip:53,
+/// then changes system DNS to 127.0.0.1 / ::1.
 async fn start_proxy(relay_ip: String) -> Result<(), String> {
     // Stop any existing proxy first
     stop_proxy_inner().await;
@@ -285,74 +476,36 @@ async fn start_proxy(relay_ip: String) -> Result<(), String> {
     let udp = UdpSocket::bind("127.0.0.1:53")
         .await
         .map_err(|e| bind_error("UDP", e))?;
-    let udp = std::sync::Arc::new(udp);
-
     let tcp = TcpListener::bind("127.0.0.1:53")
         .await
         .map_err(|e| bind_error("TCP", e))?;
 
-    // Change system DNS to localhost
-    set_system_dns("127.0.0.1")?;
+    // Second stack for the interface's IPv6 resolvers. A failure here is
+    // survivable: set_system_dns then leaves the ISP's IPv6 DNS alone rather
+    // than pointing it at a dead ::1.
+    let udp6 = UdpSocket::bind("[::1]:53").await.ok();
+    let tcp6 = TcpListener::bind("[::1]:53").await.ok();
 
-    eprintln!("[PeDitXCDN] DNS proxy started: 127.0.0.1:53 -> {}:53", relay_ip);
+    // Change system DNS to localhost
+    set_system_dns("127.0.0.1", udp6.is_some() && tcp6.is_some())?;
+
+    eprintln!(
+        "[PeDitXCDN] DNS proxy started: 127.0.0.1:53{} -> {}:53",
+        if udp6.is_some() { " + [::1]:53" } else { "" },
+        relay_ip
+    );
 
     // Store shutdown sender
     *SHUTDOWN.lock().unwrap() = Some(shutdown_tx);
 
-    // Spawn TCP accept loop — must watch shutdown too, otherwise it keeps
-    // port 53 bound after disconnect and the next connect fails.
-    let tcp_relay = relay_addr;
-    let mut tcp_stop = shutdown_rx.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                accepted = tcp.accept() => {
-                    match accepted {
-                        Ok((stream, _)) => {
-                            let relay = tcp_relay;
-                            tokio::spawn(async move { handle_tcp(stream, relay).await; });
-                        }
-                        Err(e) => {
-                            eprintln!("[PeDitXCDN] TCP accept error: {e}");
-                            break;
-                        }
-                    }
-                }
-                _ = tcp_stop.changed() => break,
-            }
-        }
-    });
-
-    // Spawn UDP forwarding loop (non-blocking — returns immediately)
-    let udp_clone = udp.clone();
-    let mut udp_stop = shutdown_rx;
-    tokio::spawn(async move {
-        let mut recv_buf = [0u8; 4096];
-        loop {
-            tokio::select! {
-                result = udp_clone.recv_from(&mut recv_buf) => {
-                    if let Ok((n, peer)) = result {
-                        let packet = recv_buf[..n].to_vec();
-                        let sock = udp_clone.clone();
-                        tokio::spawn(async move {
-                            match forward_udp(&packet, relay_addr).await {
-                                Ok(response) => {
-                                    let _ = sock.send_to(&response, peer).await;
-                                }
-                                Err(e) => {
-                                    eprintln!("[PeDitXCDN] UDP forward error: {e}");
-                                }
-                            }
-                        });
-                    }
-                }
-                _ = udp_stop.changed() => {
-                    eprintln!("[PeDitXCDN] DNS proxy stopped");
-                    break;
-                }
-            }
-        }
-    });
+    spawn_tcp_loop(tcp, relay_addr, shutdown_rx.clone());
+    spawn_udp_loop(std::sync::Arc::new(udp), relay_addr, shutdown_rx.clone());
+    if let Some(s) = udp6 {
+        spawn_udp_loop(std::sync::Arc::new(s), relay_addr, shutdown_rx.clone());
+    }
+    if let Some(l) = tcp6 {
+        spawn_tcp_loop(l, relay_addr, shutdown_rx);
+    }
 
     Ok(())
 }
@@ -522,51 +675,120 @@ pub fn resolve_relay_ip(panel_url: &str) -> Result<String, String> {
         .ok_or_else(|| format!("no IPv4 address for {host}"))
 }
 
-/// Resolve `domain` through the local proxy (127.0.0.1:53).
-/// This is the visible proof that a connection is real: a hijacked domain
-/// answers with the relay IP, a bypassed one with a public address, and no
-/// answer at all means the proxy or the relay is down.
-/// Pull answer addresses out of `nslookup` output for both platforms.
-/// The server line is 127.0.0.1 (skipped as loopback), answers may come as
-/// `Address: 1.2.3.4`, a bare `1.2.3.4` under `Addresses:`, or the `#53`
-/// authority form — so trim everything that is not part of an address.
-fn nslookup_addrs(stdout: &str, stderr: &str) -> Vec<String> {
-    let mut ips: Vec<String> = Vec::new();
-    for line in stdout.lines().chain(stderr.lines()) {
-        for tok in line.split_whitespace() {
-            let tok = tok.trim_matches(|c: char| !c.is_ascii_digit() && c != ':' && c != '.');
-            if let Ok(ip) = tok.parse::<std::net::IpAddr>() {
-                if ip.is_loopback() {
-                    continue;
-                }
-                let s = ip.to_string();
-                if !ips.contains(&s) {
-                    ips.push(s);
-                }
-            }
-        }
+fn build_query(domain: &str, qtype: u16) -> Vec<u8> {
+    let mut q = Vec::with_capacity(domain.len() + 18);
+    q.extend_from_slice(&[0x37, 0x11]); // id — one outstanding query per socket
+    q.extend_from_slice(&[0x01, 0x00]); // RD=1
+    q.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]);
+    for label in domain.trim_end_matches('.').split('.') {
+        q.push(label.len() as u8);
+        q.extend_from_slice(label.as_bytes());
     }
-    ips
+    q.push(0);
+    q.extend_from_slice(&qtype.to_be_bytes());
+    q.extend_from_slice(&[0x00, 0x01]); // IN
+    q
 }
 
-pub fn resolve_local(domain: &str) -> Result<Vec<String>, String> {
-    let out = cmd("nslookup")
-        .args([domain, "127.0.0.1"])
-        .output()
-        .map_err(|e| format!("nslookup failed: {e}"))?;
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let ips = nslookup_addrs(&stdout, &stderr);
-
-    if ips.is_empty() {
-        Err(format!(
-            "پاسخی از پروکسی محلی نیامد: {}",
-            netsh_out(&out)
-        ))
-    } else {
-        Ok(ips)
+/// Addresses of `qtype` from a response; maps the RCODE to an error so a
+/// SERVFAIL from a dead relay is not reported as "no answer".
+fn parse_answers(msg: &[u8], qtype: u16) -> Result<Vec<String>, String> {
+    if msg.len() < 12 {
+        return Err("پاسخ DNS ناقص است".to_string());
     }
+    let rcode = u16::from_be_bytes([msg[2], msg[3]]) & 0x000F;
+    if rcode != 0 {
+        return Err(format!("پروکسی/رله rcode={rcode} برگرداند"));
+    }
+    let qd = u16::from_be_bytes([msg[4], msg[5]]) as usize;
+    let an = u16::from_be_bytes([msg[6], msg[7]]) as usize;
+    let mut i = 12usize;
+    for _ in 0..qd {
+        i = match skip_name(msg, i) {
+            Some(x) => x + 4,
+            None => return Err("پاسخ DNS ناقص است".to_string()),
+        };
+    }
+    let mut ips: Vec<String> = Vec::new();
+    for _ in 0..an {
+        i = match skip_name(msg, i) {
+            Some(x) => x,
+            None => break,
+        };
+        if i + 10 > msg.len() {
+            break;
+        }
+        let typ = u16::from_be_bytes([msg[i], msg[i + 1]]);
+        let rdlen = u16::from_be_bytes([msg[i + 8], msg[i + 9]]) as usize;
+        i += 10;
+        if i + rdlen > msg.len() {
+            break;
+        }
+        let rdata = &msg[i..i + rdlen];
+        let ip = match (qtype, typ) {
+            (QTYPE_A, 1) if rdlen == 4 => Some(std::net::IpAddr::V4(
+                std::net::Ipv4Addr::new(rdata[0], rdata[1], rdata[2], rdata[3]),
+            )),
+            (QTYPE_AAAA, 28) if rdlen == 16 => {
+                let mut o = [0u8; 16];
+                o.copy_from_slice(rdata);
+                Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(o)))
+            }
+            _ => None,
+        };
+        if let Some(ip) = ip {
+            let s = ip.to_string();
+            if !ips.contains(&s) {
+                ips.push(s);
+            }
+        }
+        i += rdlen;
+    }
+    Ok(ips)
+}
+
+/// One raw UDP query against a resolver. Sync — called from spawn_blocking.
+fn query_addrs(server: &str, domain: &str, qtype: u16) -> Result<Vec<String>, String> {
+    use std::net::UdpSocket;
+    let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("UDP bind: {e}"))?;
+    sock.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .map_err(|e| format!("timeout: {e}"))?;
+    let q = build_query(domain, qtype);
+    sock.send_to(&q, server)
+        .map_err(|e| format!("ارسال کوئری DNS: {e}"))?;
+    let mut buf = [0u8; 4096];
+    let n = match sock.recv_from(&mut buf) {
+        Ok((n, _)) => n,
+        Err(e)
+            if e.kind() == std::io::ErrorKind::TimedOut
+                || e.kind() == std::io::ErrorKind::WouldBlock =>
+        {
+            return Err("پاسخی از پروکسی محلی نیامد (۲ ثانیه timeout)".to_string())
+        }
+        Err(e) => return Err(format!("خواندن پاسخ DNS: {e}")),
+    };
+    parse_answers(&buf[..n], qtype)
+}
+
+/// Resolve `domain` through the local proxy (127.0.0.1:53) with a raw query.
+/// The visible proof that the connection is real: a hijacked domain answers
+/// with the relay IP, a bypassed one with a public address, a dead proxy
+/// times out. Replaces `nslookup`, whose reverse lookup of 127.0.0.1 and
+/// localized output could not tell "no answer" from "answer we mis-parsed".
+pub fn resolve_local(domain: &str) -> Result<LocalResolve, String> {
+    let t0 = std::time::Instant::now();
+    let a = query_addrs("127.0.0.1:53", domain, QTYPE_A)?;
+    if a.is_empty() {
+        return Err("پاسخ A از پروکسی محلی برنگشت".to_string());
+    }
+    // Empty AAAA is the expected result while the proxy strips it
+    // (nodata_aaaa) — the UI renders that as «مسدود».
+    let aaaa = query_addrs("127.0.0.1:53", domain, QTYPE_AAAA).unwrap_or_default();
+    Ok(LocalResolve {
+        a,
+        aaaa,
+        ms: t0.elapsed().as_millis() as u64,
+    })
 }
 
 /// Ping the relay IP to check connectivity.
