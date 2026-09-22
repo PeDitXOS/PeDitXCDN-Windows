@@ -114,6 +114,13 @@ fn check_relay_connection(relay_ip: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
+async fn resolve_relay_ip(panel_url: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || dns::resolve_relay_ip(&panel_url))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn logout(state: tauri::State<'_, AppState>) -> Result<(), String> {
     *state.session.lock().unwrap() = None;
     Ok(())
@@ -292,6 +299,7 @@ pub fn run() {
             disconnect,
             get_dns_status,
             check_relay_connection,
+            resolve_relay_ip,
             logout,
         ])
         .run(tauri::generate_context!())

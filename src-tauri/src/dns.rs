@@ -322,6 +322,28 @@ pub fn get_dns_status() -> Result<DnsStatus, String> {
     })
 }
 
+/// Resolve the panel URL host to the relay's IPv4 address — the DNS forward
+/// target. Panel and relay share a host, so this is the only address the
+/// proxy should ever point at. `info.ip` / `info.seen_ip` are the *user's*
+/// address (ACL key), never the relay's.
+pub fn resolve_relay_ip(panel_url: &str) -> Result<String, String> {
+    use std::net::ToSocketAddrs;
+    let host = reqwest::Url::parse(panel_url)
+        .map_err(|e| format!("invalid panel URL: {e}"))?
+        .host_str()
+        .ok_or_else(|| "panel URL has no host".to_string())?
+        .to_string();
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return Ok(host);
+    }
+    (host.as_str(), 443u16)
+        .to_socket_addrs()
+        .map_err(|e| format!("cannot resolve panel host {host}: {e}"))?
+        .find(|addr| addr.is_ipv4())
+        .map(|addr| addr.ip().to_string())
+        .ok_or_else(|| format!("no IPv4 address for {host}"))
+}
+
 /// Ping the relay IP to check connectivity.
 pub fn check_relay_connection(relay_ip: &str) -> Result<bool, String> {
     let output = if cfg!(target_os = "windows") {

@@ -31,14 +31,29 @@ export function Dashboard() {
           expires?: string; status?: string;
         }>("get_user_info", { panelUrl, session });
 
-        if (info.ok) {
-          setUserInfo(info as never);
-          const ip = info.ip || info.seen_ip;
-          if (ip) setRelayIp(ip);
-        } else {
+        if (!info.ok) {
           logout();
           setScreen("login");
           return;
+        }
+
+        // Register this machine's address — the relay's nftables ACL keys off it.
+        if (info.seen_ip && info.seen_ip !== info.ip) {
+          try {
+            const claim = await invoke<{ ok: boolean }>("claim_ip", {
+              panelUrl, session, ip: info.seen_ip,
+            });
+            if (claim.ok) info.ip = info.seen_ip;
+          } catch { /* non-fatal: panel still reports the old address */ }
+        }
+        setUserInfo(info as never);
+
+        // Relay IP = the panel host. info.ip / info.seen_ip are the user's own
+        // address — forwarding DNS to those would blackhole resolution.
+        try {
+          setRelayIp(await invoke<string>("resolve_relay_ip", { panelUrl }));
+        } catch (e) {
+          setError(String(e));
         }
 
         const plansResp = await invoke<{
@@ -57,8 +72,7 @@ export function Dashboard() {
         }>("get_dns_status");
         setDnsStatus(dns as never);
 
-        const relayIp = info.ip || info.seen_ip;
-        if (relayIp && dns.configured && dns.current_dns === "127.0.0.1") {
+        if (dns.configured && dns.current_dns === "127.0.0.1") {
           setConnectionStatus("connected");
         }
       } catch (e) {
@@ -159,6 +173,15 @@ export function Dashboard() {
               <QuotaBar />
             )}
 
+            {/* Registered IP */}
+            <div className="flex items-center justify-between pt-1">
+              <span className="text-xs" style={{ color: "var(--muted)" }}>آی‌پی ثبت‌شده</span>
+              <span className="font-mono text-xs"
+                    style={{ color: userInfo.ip ? "var(--text)" : "var(--danger)" }}>
+                {userInfo.ip || "ثبت نشده"}
+              </span>
+            </div>
+
             {/* Expiry */}
             {userInfo.expires && (
               <div className="flex items-center justify-between pt-1">
@@ -194,7 +217,7 @@ export function Dashboard() {
       <div className="shrink-0 text-center py-2"
            style={{ borderTop: "1px solid var(--border)" }}>
         <span className="text-[10px]" style={{ color: "var(--muted)" }}>
-          PeDitXCDN v0.3.3
+          PeDitXCDN v0.3.5
         </span>
       </div>
     </div>
