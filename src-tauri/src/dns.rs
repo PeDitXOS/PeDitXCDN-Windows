@@ -59,8 +59,11 @@ fn interface_candidates() -> Vec<String> {
             }
         }
     }
-    for guess in ["Ethernet", "Wi-Fi", "Local Area Connection"] {
-        if !found.iter().any(|f| f == guess) {
+    // Guess only when the parse found nothing: the guesses exist for a
+    // localized/unfamiliar layout, and every miss costs a netsh call (~0.5s)
+    // that would otherwise run on each connect, on all of them plus IPv6.
+    if found.is_empty() {
+        for guess in ["Ethernet", "Wi-Fi", "Local Area Connection"] {
             found.push(guess.to_string());
         }
     }
@@ -486,8 +489,13 @@ async fn start_proxy(relay_ip: String) -> Result<(), String> {
     let udp6 = UdpSocket::bind("[::1]:53").await.ok();
     let tcp6 = TcpListener::bind("[::1]:53").await.ok();
 
-    // Change system DNS to localhost
-    set_system_dns("127.0.0.1", udp6.is_some() && tcp6.is_some())?;
+    // Change system DNS to localhost — off the runtime thread: the netsh
+    // loop is several blocking spawns (~0.5s each) and awaiting it inline
+    // starved the runtime that also drives the window.
+    let proxy_v6 = udp6.is_some() && tcp6.is_some();
+    tokio::task::spawn_blocking(move || set_system_dns("127.0.0.1", proxy_v6))
+        .await
+        .map_err(|e| e.to_string())??;
 
     eprintln!(
         "[PeDitXCDN] DNS proxy started: 127.0.0.1:53{} -> {}:53",
@@ -520,17 +528,20 @@ async fn stop_proxy_inner() {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
 
-    // Restore system DNS
-    let _ = restore_system_dns();
+    // Restore system DNS — same reason as in start_proxy: blocking netsh
+    // must not sit on an async worker.
+    let _ = tokio::task::spawn_blocking(restore_system_dns).await;
     eprintln!("[PeDitXCDN] System DNS restored to DHCP");
 }
 
 // ─── Public API (called from Tauri commands) ──────────────────────────
 
 /// Start the DNS proxy + change system DNS.
-pub fn start_dns_proxy(relay_ip: &str) -> Result<(), String> {
-    let rt = tauri::async_runtime::handle();
-    rt.block_on(start_proxy(relay_ip.to_string()))
+/// Async: `connect` awaits this instead of `handle().block_on()`. Blocking
+/// the runtime from a command made the window sit unresponsive for the whole
+/// netsh loop — Windows reported "Not responding" on the Connect press.
+pub async fn start_dns_proxy(relay_ip: &str) -> Result<(), String> {
+    start_proxy(relay_ip.to_string()).await
 }
 
 /// Stop the DNS proxy + restore system DNS (non-blocking, safe from any thread).

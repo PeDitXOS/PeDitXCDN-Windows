@@ -89,16 +89,19 @@ async fn claim_ip(
     api::claim_ip(&url, &tok, &ip).await
 }
 
+// Async, not sync: a sync command runs on the core thread and `connect`
+// waits on several netsh spawns — sync meant the window froze ("Not
+// responding") for the whole Connect press. Locks are taken after the await.
 #[tauri::command]
-fn connect(state: tauri::State<'_, AppState>, relay_ip: String) -> Result<String, String> {
-    dns::start_dns_proxy(&relay_ip)?;
+async fn connect(state: tauri::State<'_, AppState>, relay_ip: String) -> Result<String, String> {
+    dns::start_dns_proxy(&relay_ip).await?;
     *state.connected.lock().unwrap() = true;
     Ok(relay_ip)
 }
 
 #[tauri::command]
-fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    dns::stop_dns_proxy();
+async fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    dns::stop_dns_proxy_async().await;
     *state.connected.lock().unwrap() = false;
     Ok(())
 }
