@@ -131,8 +131,7 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
         &connect, &disconnect, &separator, &show, &separator2, &quit,
     ])?;
 
-    let _tray = TrayIconBuilder::new()
-        .id("main-tray")
+    let _tray = TrayIconBuilder::new("main-tray")
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&menu)
         .tooltip("PeDitXCDN")
@@ -259,11 +258,9 @@ pub fn run() {
                 }
             }
 
-            // Create tray only if not already present (avoid duplicate icons after crash)
-            if app.tray_by_id("main-tray").is_none() {
-                if let Err(e) = create_tray(app.handle()) {
-                    eprintln!("Warning: tray icon failed: {e}");
-                }
+            // Create tray - non-fatal if it fails
+            if let Err(e) = create_tray(app.handle()) {
+                eprintln!("Warning: tray icon failed: {e}");
             }
 
             // Hide to tray on close instead of quitting + cleanup
