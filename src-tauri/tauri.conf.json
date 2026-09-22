@@ -42,9 +42,6 @@
     "windows": {
       "nsis": {
         "installMode": "both"
-      },
-      "manifest": {
-        "path": "PeDitXCDN.exe.manifest"
       }
     }
   },
