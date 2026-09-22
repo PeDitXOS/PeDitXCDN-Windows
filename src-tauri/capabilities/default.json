@@ -5,12 +5,7 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "shell:default",
-    "shell:allow-open",
     "opener:default",
-    "opener:allow-open-url",
-    "process:default",
-    "process:allow-restart",
-    "updater:default"
+    "opener:allow-open-url"
   ]
 }
