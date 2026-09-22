@@ -31,6 +31,7 @@ pub async fn login(
         .map_err(|e| format!("login request failed: {e}"))?;
 
     let status = resp.status();
+    eprintln!("[PeDitXCDN] Login response status: {}", status);
     let location = resp
         .headers()
         .get("location")
@@ -63,8 +64,8 @@ pub async fn login(
         })
     } else if status == 200 {
         // Panel returned 200 directly (some panels don't redirect on login)
-        // Check cookies for session — if cookies are set, login succeeded
         let body = resp.text().await.unwrap_or_default();
+        eprintln!("[PeDitXCDN] Login 200 body (first 500): {}", &body[..body.len().min(500)]);
         let is_error = body.contains("class=\"error\"")
             || body.contains("e=1")
             || body.contains("error")

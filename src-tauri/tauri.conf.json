@@ -24,10 +24,6 @@
     ],
     "security": {
       "csp": "default-src 'self'; connect-src 'self' https: http://127.0.0.1:*; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https://fonts.gstatic.com"
-    },
-    "trayIcon": {
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": false
     }
   },
   "bundle": {
