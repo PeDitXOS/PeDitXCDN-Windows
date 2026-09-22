@@ -61,6 +61,27 @@ pub async fn login(
             session: Some("cookie".into()),
             message: None,
         })
+    } else if status == 200 {
+        // Panel returned 200 directly (some panels don't redirect on login)
+        // Check cookies for session — if cookies are set, login succeeded
+        let body = resp.text().await.unwrap_or_default();
+        let is_error = body.contains("class=\"error\"")
+            || body.contains("e=1")
+            || body.contains("error")
+            || body.contains("خطا");
+        if is_error {
+            Ok(LoginResponse {
+                ok: false,
+                session: None,
+                message: Some("login failed".into()),
+            })
+        } else {
+            Ok(LoginResponse {
+                ok: true,
+                session: Some("cookie".into()),
+                message: None,
+            })
+        }
     } else {
         Ok(LoginResponse {
             ok: false,
