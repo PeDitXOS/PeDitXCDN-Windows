@@ -62,6 +62,7 @@ pub struct SimpleResponse {
 pub struct DnsStatus {
     pub configured: bool,
     pub current_dns: Option<String>,
+    pub ipv6_dns: Option<String>,
     pub interface: String,
     pub is_relay_dns: bool,
 }

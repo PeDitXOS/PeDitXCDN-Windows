@@ -290,10 +290,15 @@ pub fn run() {
             panel_url: Mutex::new(None),
         })
         .setup(|app| {
-            // Crash recovery: if DNS is stuck at 127.0.0.1 from a previous crash,
-            // restore it directly (can't use stop_dns_proxy here — no tokio runtime yet)
+            // Crash recovery: if DNS is stuck on the proxy from a previous
+            // crash (or a killed "Not responding" window), restore it directly
+            // — can't use stop_dns_proxy here, there is no tokio runtime yet.
+            // Both stacks: a leftover ::1 breaks resolution just as hard as a
+            // leftover 127.0.0.1, and get_dns_status used to report neither.
             if let Ok(status) = dns::get_dns_status() {
-                if status.current_dns.as_deref() == Some("127.0.0.1") {
+                if status.current_dns.as_deref() == Some("127.0.0.1")
+                    || status.ipv6_dns.as_deref() == Some("::1")
+                {
                     eprintln!("[PeDitXCDN] Found stale proxy DNS, restoring DHCP...");
                     dns::restore_system_dns();
                 }

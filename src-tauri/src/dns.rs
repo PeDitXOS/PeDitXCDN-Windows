@@ -566,6 +566,26 @@ pub async fn stop_dns_proxy_async() {
 }
 
 /// Get current DNS configuration status.
+/// Every IP a netsh `show dns` block lists as a server.
+/// The old filter skipped any line containing "dns servers" — which is the
+/// *only* line that carries an address (`Statically Configured DNS Servers:
+/// 127.0.0.1`) — so `current_dns` was always `None`, the startup recovery
+/// never fired, and after a killed session the system stayed pointed at a
+/// dead 127.0.0.1: login then failed with "error sending request for url".
+/// Parsing tokens as IPs sidesteps the localized column names entirely.
+fn netsh_dns_ips(text: &str) -> Vec<String> {
+    let mut ips: Vec<String> = Vec::new();
+    for tok in text.split(|c: char| c.is_whitespace() || c == ',' || c == ';') {
+        if let Ok(ip) = tok.parse::<std::net::IpAddr>() {
+            let s = ip.to_string();
+            if !ips.contains(&s) {
+                ips.push(s);
+            }
+        }
+    }
+    ips
+}
+
 pub fn get_dns_status() -> Result<DnsStatus, String> {
     #[cfg(target_os = "windows")]
     {
@@ -578,19 +598,36 @@ pub fn get_dns_status() -> Result<DnsStatus, String> {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let configured = stdout.to_lowercase().contains("static");
 
-        let current_dns = stdout
-            .lines()
-            .find(|line| {
-                let l = line.trim().to_lowercase();
-                l.contains('.') && !l.contains("dns servers") && !l.contains("configuration")
-            })
-            .map(|line| line.trim().to_string());
+        // Loopback first: a primary+secondary pair is still "proxy mode"
+        // if either points at us.
+        let v4 = netsh_dns_ips(&stdout);
+        let current_dns = v4
+            .iter()
+            .find(|s| *s == "127.0.0.1")
+            .cloned()
+            .or_else(|| v4.first().cloned());
+
+        // v0.3.15 also repoints the IPv6 resolvers at ::1 — a leftover ::1
+        // after a kill is exactly as fatal as a leftover 127.0.0.1, and
+        // Windows will happily keep racing it (SMHNR).
+        let v6 = cmd("netsh")
+            .args(["interface", "ipv6", "show", "dns", &iface])
+            .output()
+            .ok()
+            .map(|o| netsh_dns_ips(&String::from_utf8_lossy(&o.stdout)))
+            .unwrap_or_default();
+        let ipv6_dns = v6
+            .iter()
+            .find(|s| *s == "::1")
+            .cloned()
+            .or_else(|| v6.first().cloned());
 
         let is_relay_dns = current_dns.as_deref() == Some("127.0.0.1");
 
         Ok(DnsStatus {
             configured,
             current_dns,
+            ipv6_dns,
             interface: iface,
             is_relay_dns,
         })
@@ -600,6 +637,7 @@ pub fn get_dns_status() -> Result<DnsStatus, String> {
     Ok(DnsStatus {
         configured: false,
         current_dns: None,
+        ipv6_dns: None,
         interface: "N/A".into(),
         is_relay_dns: false,
     })

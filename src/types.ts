@@ -53,6 +53,7 @@ export interface SimpleResponse {
 export interface DnsStatus {
   configured: boolean;
   current_dns?: string;
+  ipv6_dns?: string;
   interface: string;
   is_relay_dns: boolean;
 }

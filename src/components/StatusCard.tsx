@@ -131,6 +131,17 @@ export function StatusCard() {
         </div>
       )}
 
+      {dnsStatus?.ipv6_dns && (
+        <div className="flex items-center justify-between">
+          <span className="text-xs" style={{ color: "var(--muted)" }}>DNS شش‌خانه</span>
+          <span className="font-mono text-xs" style={{
+            color: dnsStatus.ipv6_dns === "::1" ? "var(--success)" : "var(--warn)",
+          }}>
+            {dnsStatus.ipv6_dns}{dnsStatus.ipv6_dns === "::1" ? "  ✓" : "  ⚠"}
+          </span>
+        </div>
+      )}
+
       {connectionStatus === "connected" && (
         <div className="space-y-1 pt-1">
           <div className="flex items-center justify-between gap-2">
