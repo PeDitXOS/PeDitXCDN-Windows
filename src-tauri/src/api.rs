@@ -48,6 +48,7 @@ pub async fn login(
     log_to_file(&format!("LOGIN: url={}, user={}", url, username));
     let resp = match http_client()
         .post(&url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
         .form(&[("username", username), ("password", password)])
         .send()
         .await {
@@ -92,9 +93,9 @@ pub async fn login(
             message: None,
         })
     } else if status == 200 {
-        // Panel returned 200 directly (some panels don't redirect on login)
+        // Panel returned 200 — check if it's the login page again (failed) or dashboard
         let body = resp.text().await.unwrap_or_default();
-        log_to_file(&format!("LOGIN 200 body (500): {}", &body[..body.len().min(500)]));
+        log_to_file(&format!("LOGIN 200 body (2000): {}", &body[..body.len().min(2000)]));
         let is_error = body.contains("class=\"error\"")
             || body.contains("e=1")
             || body.contains("error")
