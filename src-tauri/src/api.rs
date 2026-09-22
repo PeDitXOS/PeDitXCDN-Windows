@@ -138,96 +138,74 @@ pub async fn signup(
     Ok(LoginResponse { ok: false, session: None, message: Some("signup failed".into()) })
 }
 
-/// Fetch user info (quota, plan, speed, expiry, etc.).
-pub async fn get_user_info(panel_url: &str, _session: &str) -> Result<UserInfo, String> {
-    let url = format!("{}/", panel_url);
+/// Fetch user info (quota, plan, speed, expiry, etc.) via JSON API.
+pub async fn get_user_info(panel_url: &str, session: &str) -> Result<UserInfo, String> {
+    let url = format!("{}/user-info", panel_url);
     let resp = http_client()
-        .get(&url)
+        .post(&url)
+        .json(&serde_json::json!({"session": session}))
         .send()
         .await
         .map_err(|e| format!("user-info request failed: {e}"))?;
-    let html = resp.text().await.map_err(|e| format!("user-info read failed: {e}"))?;
-    parse_dashboard_html(&html)
-}
-
-/// Parse the dashboard HTML to extract user info.
-fn parse_dashboard_html(html: &str) -> Result<UserInfo, String> {
-    let get_val = |key: &str| -> Option<String> {
-        let patterns = [format!("class='k'>{}</div>", key), format!("class=\"k\">{}</div>", key)];
-        for pat in &patterns {
-            if let Some(pos) = html.find(pat.as_str()) {
-                let after = &html[pos + pat.len()..];
-                if let Some(start) = after.find("class='v'>") {
-                    let val = &after[start + 10..];
-                    if let Some(end) = val.find('<') {
-                        return Some(val[..end].to_string());
-                    }
-                }
-            }
+    let body = resp.text().await.unwrap_or_default();
+    log_to_file(&format!("USER_INFO BODY: {}", &body[..body.len().min(1000)]));
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+        if !json["ok"].as_bool().unwrap_or(false) {
+            return Err(json["message"].as_str().unwrap_or("user info failed").to_string());
         }
-        None
-    };
-
-    Ok(UserInfo {
-        ok: true,
-        name: get_val("نام"),
-        ip: None,
-        telegram_id: None,
-        used: None,
-        quota: None,
-        status: get_val("وضعیت").map(|s| if s.contains("فعال") || s.contains("active") { "active".into() } else { s }),
-        wallet: None,
-        plan: None,
-        plan_name: get_val("plan"),
-        renews: None,
-        expires: get_val("انقضا").or_else(|| get_val("تاریخ انقضا")),
-        speed_kbps: None,
-        speed_mbps: get_val("سرعت").and_then(|s| s.replace("Kb/s", "").replace(" Mb/s", "").trim().parse().ok()),
-        days_left: get_val("روز باقیمانده").and_then(|s| s.parse().ok()),
-        gb_used: get_val("حجم مصرفی").and_then(|s| s.replace("GB", "").trim().parse().ok()),
-        gb_total: get_val("حجم کل").and_then(|s| s.replace("GB", "").trim().parse().ok()),
-        warned: None,
-        seen_ip: None,
-    })
+        return Ok(UserInfo {
+            ok: true,
+            name: json["name"].as_str().map(|s| s.to_string()),
+            telegram_id: json["telegram_id"].as_i64(),
+            ip: json["ip"].as_str().map(|s| s.to_string()),
+            used: json["used"].as_f64(),
+            quota: json["quota"].as_f64(),
+            status: json["status"].as_str().map(|s| s.to_string()),
+            wallet: json["wallet"].as_f64(),
+            plan: json["plan"].as_str().map(|s| s.to_string()),
+            plan_name: json["plan_name"].as_str().map(|s| s.to_string()),
+            renews: json["renews"].as_str().map(|s| s.to_string()),
+            expires: json["expires"].as_str().map(|s| s.to_string()),
+            speed_kbps: json["speed_kbps"].as_f64(),
+            speed_mbps: json["speed_mbps"].as_f64(),
+            days_left: json["days_left"].as_i64().map(|v| v as i32),
+            gb_used: json["gb_used"].as_f64(),
+            gb_total: json["gb_total"].as_f64(),
+            warned: json["warned"].as_i64().map(|v| v as i32),
+            seen_ip: json["seen_ip"].as_str().map(|s| s.to_string()),
+        });
+    }
+    Err("invalid user-info response".into())
 }
 
-/// Fetch available plans.
-pub async fn get_plans(panel_url: &str, _session: &str) -> Result<PlansResponse, String> {
+/// Fetch available plans via JSON API.
+pub async fn get_plans(panel_url: &str, session: &str) -> Result<PlansResponse, String> {
     let url = format!("{}/plans", panel_url);
     let resp = http_client()
-        .get(&url)
+        .post(&url)
+        .json(&serde_json::json!({"session": session}))
         .send()
         .await
         .map_err(|e| format!("plans request failed: {e}"))?;
-    let html = resp.text().await.map_err(|e| format!("plans read failed: {e}"))?;
-
-    if let Ok(plans) = serde_json::from_str::<PlansResponse>(&html) {
-        return Ok(plans);
-    }
-
-    let mut plans = Vec::new();
-    for block in html.split("class='card'") {
-        if block.contains("plan") || block.contains("پلن") {
-            if let Some(name) = extract_between(block, "class='v'>", "<") {
-                plans.push(crate::types::Plan {
-                    id: plans.len() as i32 + 1,
-                    name,
-                    price: 0,
-                    desc: None,
-                    days: None,
-                    gb: None,
-                    mbps: None,
-                });
-            }
+    let body = resp.text().await.unwrap_or_default();
+    log_to_file(&format!("PLANS BODY: {}", &body[..body.len().min(1000)]));
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+        if !json["ok"].as_bool().unwrap_or(false) {
+            return Err(json["message"].as_str().unwrap_or("plans failed").to_string());
         }
+        let plans = json["plans"].as_array().map(|arr| arr.iter().filter_map(|p| Some(crate::types::Plan {
+            id: p["id"].as_i64()? as i32,
+            name: p["name"].as_str()?.to_string(),
+            price: p["price"].as_i64().unwrap_or(0),
+            desc: p["desc"].as_str().map(|s| s.to_string()),
+            days: p["days"].as_i64().map(|v| v as i32),
+            gb: p["gb"].as_f64(),
+            mbps: p["mbps"].as_f64(),
+        })).collect());
+        let current = json["current"].as_i64().map(|v| v as i32);
+        return Ok(PlansResponse { ok: true, plans, current });
     }
-    Ok(PlansResponse { ok: true, plans: if plans.is_empty() { None } else { Some(plans) }, current: None })
-}
-
-fn extract_between<'a>(haystack: &'a str, start: &str, end: &str) -> Option<String> {
-    let s = haystack.find(start)? + start.len();
-    let e = haystack[s..].find(end)? + s;
-    Some(haystack[s..e].trim().to_string())
+    Err("invalid plans response".into())
 }
 
 /// Register/update the client's IP address with the panel.
