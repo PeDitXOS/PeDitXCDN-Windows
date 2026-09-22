@@ -10,29 +10,64 @@ fn http_client() -> &'static Client {
             // ponytail: skip TLS verification for self-signed certs on panel.
             // Upgrade when panel gets a proper CA-signed cert.
             .danger_accept_invalid_certs(true)
+            .cookie_store(true)
             .build()
             .expect("reqwest client")
     })
 }
 
-/// Login with username + password. Returns session token on success.
+/// Login with username + password. Uses form-based login, returns session on success.
 pub async fn login(
     panel_url: &str,
     username: &str,
     password: &str,
 ) -> Result<LoginResponse, String> {
-    let url = format!("{}/user-password-login", panel_url);
-    let body = serde_json::json!({
-        "username": username,
-        "password": password,
-    });
+    let url = format!("{}/login", panel_url);
     let resp = http_client()
         .post(&url)
-        .json(&body)
+        .form(&[("username", username), ("password", password)])
         .send()
         .await
         .map_err(|e| format!("login request failed: {e}"))?;
-    resp.json().await.map_err(|e| format!("login parse failed: {e}"))
+
+    let status = resp.status();
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    if status == 303 || status == 302 {
+        // Decode redirect message
+        if let Some(query) = location.split('?').nth(1) {
+            for part in query.split('&') {
+                if let Some((key, val)) = part.split_once('=') {
+                    if key == "m" {
+                        let msg = urlencoding::decode(val).unwrap_or_default().to_string();
+                        let is_error = location.contains("e=1");
+                        return Ok(LoginResponse {
+                            ok: !is_error,
+                            session: if is_error { None } else { Some("cookie".into()) },
+                            message: Some(msg),
+                        });
+                    }
+                }
+            }
+        }
+        // Successful redirect (no error) — session is in cookies
+        Ok(LoginResponse {
+            ok: true,
+            session: Some("cookie".into()),
+            message: None,
+        })
+    } else {
+        Ok(LoginResponse {
+            ok: false,
+            session: None,
+            message: Some(format!("unexpected status: {}", status)),
+        })
+    }
 }
 
 /// Create a new account.
@@ -42,56 +77,156 @@ pub async fn signup(
     password: &str,
     name: &str,
 ) -> Result<LoginResponse, String> {
-    let url = format!("{}/user-signup", panel_url);
-    let body = serde_json::json!({
-        "username": username,
-        "password": password,
-        "name": name,
-    });
+    let url = format!("{}/signup", panel_url);
     let resp = http_client()
         .post(&url)
-        .json(&body)
+        .form(&[
+            ("username", username),
+            ("password", password),
+            ("name", name),
+        ])
         .send()
         .await
         .map_err(|e| format!("signup request failed: {e}"))?;
-    resp.json().await.map_err(|e| format!("signup parse failed: {e}"))
+
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    if location.contains("e=1") {
+        if let Some(query) = location.split('?').nth(1) {
+            for part in query.split('&') {
+                if let Some((key, val)) = part.split_once('=') {
+                    if key == "m" {
+                        let msg = urlencoding::decode(val).unwrap_or_default().to_string();
+                        return Ok(LoginResponse { ok: false, session: None, message: Some(msg) });
+                    }
+                }
+            }
+        }
+        Ok(LoginResponse { ok: false, session: None, message: Some("signup failed".into()) })
+    } else {
+        Ok(LoginResponse { ok: true, session: Some("cookie".into()), message: None })
+    }
 }
 
 /// Fetch user info (quota, plan, speed, expiry, etc.).
-pub async fn get_user_info(panel_url: &str, session: &str) -> Result<UserInfo, String> {
-    let url = format!("{}/user-info", panel_url);
-    let body = serde_json::json!({ "session": session });
+pub async fn get_user_info(panel_url: &str, _session: &str) -> Result<UserInfo, String> {
+    let url = format!("{}/", panel_url);
     let resp = http_client()
-        .post(&url)
-        .json(&body)
+        .get(&url)
         .send()
         .await
         .map_err(|e| format!("user-info request failed: {e}"))?;
-    resp.json().await.map_err(|e| format!("user-info parse failed: {e}"))
+    let html = resp.text().await.map_err(|e| format!("user-info read failed: {e}"))?;
+    // Parse the HTML dashboard to extract user info
+    parse_dashboard_html(&html)
+}
+
+/// Parse the dashboard HTML to extract user info.
+fn parse_dashboard_html(html: &str) -> Result<UserInfo, String> {
+    // The dashboard has rows with key-value pairs
+    let get_val = |key: &str| -> Option<String> {
+        let patterns = [format!("class='k'>{}</div>", key), format!("class=\"k\">{}</div>", key)];
+        for pat in &patterns {
+            if let Some(pos) = html.find(pat.as_str()) {
+                let after = &html[pos + pat.len()..];
+                if let Some(start) = after.find("class='v'>") {
+                    let val = &after[start + 10..];
+                    if let Some(end) = val.find('<') {
+                        return Some(val[..end].to_string());
+                    }
+                }
+            }
+        }
+        None
+    };
+
+    Ok(UserInfo {
+        ok: true,
+        name: get_val("نام"),
+        ip: None,
+        telegram_id: None,
+        used: None,
+        quota: None,
+        status: get_val("وضعیت").map(|s| if s.contains("فعال") || s.contains("active") { "active".into() } else { s }),
+        wallet: None,
+        plan: None,
+        plan_name: get_val("plan"),
+        renews: None,
+        expires: get_val("انقضا").or_else(|| get_val("تاریخ انقضا")),
+        speed_kbps: None,
+        speed_mbps: get_val("سرعت").and_then(|s| s.replace("Kb/s", "").replace(" Mb/s", "").trim().parse().ok()),
+        days_left: get_val("روز باقیمانده").and_then(|s| s.parse().ok()),
+        gb_used: get_val("حجم مصرفی").and_then(|s| s.replace("GB", "").trim().parse().ok()),
+        gb_total: get_val("حجم کل").and_then(|s| s.replace("GB", "").trim().parse().ok()),
+        warned: None,
+        seen_ip: None,
+    })
 }
 
 /// Fetch available plans.
-pub async fn get_plans(panel_url: &str, session: &str) -> Result<PlansResponse, String> {
+pub async fn get_plans(panel_url: &str, _session: &str) -> Result<PlansResponse, String> {
     let url = format!("{}/plans", panel_url);
-    let body = serde_json::json!({ "session": session });
     let resp = http_client()
-        .post(&url)
-        .json(&body)
+        .get(&url)
         .send()
         .await
         .map_err(|e| format!("plans request failed: {e}"))?;
-    resp.json().await.map_err(|e| format!("plans parse failed: {e}"))
+    let html = resp.text().await.map_err(|e| format!("plans read failed: {e}"))?;
+
+    // Try JSON first
+    if let Ok(plans) = serde_json::from_str::<PlansResponse>(&html) {
+        return Ok(plans);
+    }
+
+    // Parse HTML plans page
+    let mut plans = Vec::new();
+    for block in html.split("class='card'") {
+        if block.contains("plan") || block.contains("پلن") {
+            if let Some(name) = extract_between(block, "class='v'>", "<") {
+                plans.push(crate::types::Plan {
+                    id: plans.len() as i32 + 1,
+                    name,
+                    price: 0,
+                    desc: None,
+                    days: None,
+                    gb: None,
+                    mbps: None,
+                });
+            }
+        }
+    }
+    Ok(PlansResponse { ok: true, plans: if plans.is_empty() { None } else { Some(plans) }, current: None })
+}
+
+fn extract_between<'a>(haystack: &'a str, start: &str, end: &str) -> Option<String> {
+    let s = haystack.find(start)? + start.len();
+    let e = haystack[s..].find(end)? + s;
+    Some(haystack[s..e].trim().to_string())
 }
 
 /// Register/update the client's IP address with the panel.
-pub async fn claim_ip(panel_url: &str, session: &str, ip: &str) -> Result<SimpleResponse, String> {
-    let url = format!("{}/user-claim", panel_url);
-    let body = serde_json::json!({ "session": session, "ip": ip });
+pub async fn claim_ip(panel_url: &str, _session: &str, ip: &str) -> Result<SimpleResponse, String> {
+    let url = format!("{}/", panel_url);
     let resp = http_client()
         .post(&url)
-        .json(&body)
+        .form(&[("ip", ip)])
         .send()
         .await
         .map_err(|e| format!("claim-ip request failed: {e}"))?;
-    resp.json().await.map_err(|e| format!("claim-ip parse failed: {e}"))
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if location.contains("e=1") {
+        Ok(SimpleResponse { ok: false, message: Some("claim failed".into()) })
+    } else {
+        Ok(SimpleResponse { ok: true, message: Some("IP claimed".into()) })
+    }
 }
