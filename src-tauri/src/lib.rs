@@ -171,16 +171,21 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
 }
 
 /// Check if running as admin, and relaunch with UAC if not.
+/// Uses --elevated flag to prevent infinite restart loop.
 #[cfg(target_os = "windows")]
 fn ensure_admin() {
-    // Try to bind port 53 — if it fails, we need admin
+    let already_elevated = std::env::args().any(|a| a == "--elevated");
+
+    // Try to bind port 53 — if it works, we have admin
     use std::net::UdpSocket;
-    match UdpSocket::bind("0.0.0.0:53") {
-        Ok(socket) => {
-            drop(socket); // We can bind, we're admin
-            return;
-        }
-        Err(_) => {}
+    if UdpSocket::bind("0.0.0.0:53").is_ok() {
+        return;
+    }
+
+    // Already tried elevation but still can't bind — continue anyway (port may be held by system)
+    if already_elevated {
+        eprintln!("[PeDitXCDN] Already elevated but port 53 still unavailable, continuing...");
+        return;
     }
 
     // Need admin — relaunch with ShellExecuteW "runas"
@@ -188,14 +193,16 @@ fn ensure_admin() {
     let path_str = exe_path.to_str().unwrap();
 
     let operation: Vec<u16> = "runas\0".encode_utf16().collect();
-    let path: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+    // Append --elevated arg so we don't loop
+    let cmd_line = format!("\"{}\" --elevated\0", path_str);
+    let cmd: Vec<u16> = cmd_line.encode_utf16().collect();
 
     unsafe {
         windows_sys::Win32::UI::Shell::ShellExecuteW(
             std::ptr::null_mut(),
             operation.as_ptr(),
             path.as_ptr(),
-            std::ptr::null(),
+            cmd.as_ptr(),
             std::ptr::null(),
             windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
         );
