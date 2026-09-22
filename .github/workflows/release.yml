@@ -41,12 +41,13 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      # Step 1: Decode certificate
+      # Step 1: Decode certificate (skipped if secret not set)
       - name: Decode certificate
-        if: ${{ secrets.CERTIFICATE_BASE64 != '' }}
+        if: env.HAS_CERT != ''
         shell: pwsh
         env:
           CERTIFICATE_BASE64: ${{ secrets.CERTIFICATE_BASE64 }}
+          HAS_CERT: ${{ secrets.CERTIFICATE_BASE64 }}
         run: |
           $certBytes = [Convert]::FromBase64String($env:CERTIFICATE_BASE64)
           [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\certificate.pfx", $certBytes)
@@ -66,10 +67,12 @@ jobs:
           prerelease: false
           args: '--bundles nsis'
 
-      # Step 3: Sign the built EXE
+      # Step 3: Sign the built EXE (skipped if secret not set)
       - name: Sign executables
-        if: ${{ secrets.CERTIFICATE_BASE64 != '' }}
+        if: env.HAS_CERT != ''
         shell: pwsh
+        env:
+          HAS_CERT: ${{ secrets.CERTIFICATE_BASE64 }}
         run: |
           $certPath = "$env:RUNNER_TEMP\certificate.pfx"
           $exeFiles = Get-ChildItem -Path "src-tauri\target\release\bundle\nsis" -Recurse -Filter "*.exe" -ErrorAction SilentlyContinue
