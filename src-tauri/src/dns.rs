@@ -82,7 +82,7 @@ fn netsh_out(out: &std::process::Output) -> String {
         s.push_str(&err);
     }
     if s.is_empty() {
-        format!("exit {:?}", out.status.code());
+        format!("exit {:?}", out.status.code())
     } else {
         s
     }
