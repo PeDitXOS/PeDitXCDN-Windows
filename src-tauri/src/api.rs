@@ -30,17 +30,21 @@ fn http_client() -> &'static Client {
         Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             // ponytail: skip TLS verification for self-signed certs on panel.
-            // Upgrade when panel gets a proper CA-signed cert.
             .danger_accept_invalid_certs(true)
             .cookie_store(true)
-            // Don't auto-follow redirects — we need to see the 303 location header
-            .redirect(reqwest::redirect::Policy::none())
+            // Follow redirects — the relay returns 303 with Set-Cookie after login.
+            .redirect(reqwest::redirect::Policy::limited(5))
             .build()
             .expect("reqwest client")
     })
 }
 
-/// Login with username + password. Uses form-based login, returns session on success.
+/// Login with username + password via the relay panel.
+///
+/// The relay's POST /login expects URL-encoded form data (username + password).
+/// On success the relay returns 303 redirect to /register-ip with a Set-Cookie
+/// header containing the session token. We follow the redirect, then extract
+/// the session from the cookies jar.
 pub async fn login(
     panel_url: &str,
     username: &str,
@@ -48,8 +52,10 @@ pub async fn login(
 ) -> Result<LoginResponse, String> {
     let url = format!("{}/login", panel_url);
     log_to_file(&format!("LOGIN: url={}, user={}", url, username));
+
     let resp = match http_client()
         .post(&url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
         .form(&[("username", username), ("password", password)])
         .send()
         .await {
@@ -62,66 +68,85 @@ pub async fn login(
 
     let status = resp.status();
     log_to_file(&format!("LOGIN STATUS: {}", status));
-    let location = resp
-        .headers()
-        .get("location")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
 
-    if status == 303 || status == 302 {
-        log_to_file(&format!("LOGIN REDIRECT: location={}", location));
-        // Decode redirect message
-        if let Some(query) = location.split('?').nth(1) {
+    // After following redirects, the final URL tells us whether login succeeded.
+    // The relay redirects to /register-ip on success, or back to /login?m=...&e=1 on failure.
+    let final_url = resp.url().clone().to_string();
+    log_to_file(&format!("LOGIN FINAL URL: {}", final_url));
+
+    // Check for error in redirect query params
+    if final_url.contains("e=1") {
+        if let Some(query) = final_url.split('?').nth(1) {
             for part in query.split('&') {
                 if let Some((key, val)) = part.split_once('=') {
                     if key == "m" {
                         let msg = urlencoding::decode(val).unwrap_or_default().to_string();
-                        let is_error = location.contains("e=1");
+                        log_to_file(&format!("LOGIN FAILED: {}", msg));
                         return Ok(LoginResponse {
-                            ok: !is_error,
-                            session: if is_error { None } else { Some("cookie".into()) },
+                            ok: false,
+                            session: None,
                             message: Some(msg),
                         });
                     }
                 }
             }
         }
-        // Successful redirect (no error) — session is in cookies
+        log_to_file("LOGIN FAILED: redirect with e=1 but no message".into());
+        return Ok(LoginResponse {
+            ok: false,
+            session: None,
+            message: Some("login failed".into()),
+        });
+    }
+
+    // Success — extract session token from cookies
+    let session = extract_session_from_response(&resp);
+    log_to_file(&format!("LOGIN SESSION: {:?}", session));
+
+    if session.is_some() {
         Ok(LoginResponse {
             ok: true,
-            session: Some("cookie".into()),
+            session,
             message: None,
         })
-    } else if status == 200 {
-        // Panel returned 200 — check if it's the login page again (failed) or dashboard
+    } else {
+        // No session cookie — maybe we landed on the dashboard without redirect.
+        // Check if the body looks like the dashboard (has account info).
         let body = resp.text().await.unwrap_or_default();
-        log_to_file(&format!("LOGIN 200 body (2000): {}", &body[..body.len().min(2000)]));
-        let is_error = body.contains("class=\"error\"")
-            || body.contains("e=1")
-            || body.contains("error")
-            || body.contains("خطا");
-        if is_error {
-            Ok(LoginResponse {
-                ok: false,
-                session: None,
-                message: Some("login failed".into()),
-            })
-        } else {
+        log_to_file(&format!("LOGIN NO COOKIE body (500): {}", &body[..body.len().min(500)]));
+
+        if body.contains("class='v'>") || body.contains("class=\"v\">") {
+            // Looks like dashboard HTML — login succeeded but no cookie was set (weird).
             Ok(LoginResponse {
                 ok: true,
                 session: Some("cookie".into()),
                 message: None,
             })
+        } else {
+            Ok(LoginResponse {
+                ok: false,
+                session: None,
+                message: Some("login failed".into()),
+            })
         }
-    } else {
-        log_to_file(&format!("LOGIN UNEXPECTED: status={}", status));
-        Ok(LoginResponse {
-            ok: false,
-            session: None,
-            message: Some(format!("unexpected status: {}", status)),
-        })
     }
+}
+
+/// Extract the session token from the Set-Cookie header named "sdu".
+fn extract_session_from_response(resp: &reqwest::Response) -> Option<String> {
+    let headers = resp.headers();
+    for value in headers.get_all("set-cookie").iter() {
+        if let Ok(s) = value.to_str() {
+            if let Some(cookie) = s.split(';').next() {
+                if let Some((name, val)) = cookie.split_once('=') {
+                    if name.trim() == "sdu" {
+                        return Some(val.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Create a new account.
@@ -132,26 +157,27 @@ pub async fn signup(
     name: &str,
 ) -> Result<LoginResponse, String> {
     let url = format!("{}/signup", panel_url);
-    let resp = http_client()
+    log_to_file(&format!("SIGNUP: url={}, user={}", url, username));
+
+    let resp = match http_client()
         .post(&url)
-        .form(&[
-            ("username", username),
-            ("password", password),
-            ("name", name),
-        ])
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[("username", username), ("password", password), ("name", name)])
         .send()
-        .await
-        .map_err(|e| format!("signup request failed: {e}"))?;
+        .await {
+            Ok(r) => r,
+            Err(e) => {
+                log_to_file(&format!("SIGNUP ERROR: {}", e));
+                return Err(format!("signup request failed: {e}"));
+            }
+        };
 
-    let location = resp
-        .headers()
-        .get("location")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
+    let status = resp.status();
+    let final_url = resp.url().clone().to_string();
+    log_to_file(&format!("SIGNUP STATUS: {}, FINAL: {}", status, final_url));
 
-    if location.contains("e=1") {
-        if let Some(query) = location.split('?').nth(1) {
+    if final_url.contains("e=1") {
+        if let Some(query) = final_url.split('?').nth(1) {
             for part in query.split('&') {
                 if let Some((key, val)) = part.split_once('=') {
                     if key == "m" {
@@ -163,7 +189,12 @@ pub async fn signup(
         }
         Ok(LoginResponse { ok: false, session: None, message: Some("signup failed".into()) })
     } else {
-        Ok(LoginResponse { ok: true, session: Some("cookie".into()), message: None })
+        let session = extract_session_from_response(&resp);
+        Ok(LoginResponse {
+            ok: true,
+            session: session.or(Some("cookie".into())),
+            message: None,
+        })
     }
 }
 
@@ -176,13 +207,11 @@ pub async fn get_user_info(panel_url: &str, _session: &str) -> Result<UserInfo, 
         .await
         .map_err(|e| format!("user-info request failed: {e}"))?;
     let html = resp.text().await.map_err(|e| format!("user-info read failed: {e}"))?;
-    // Parse the HTML dashboard to extract user info
     parse_dashboard_html(&html)
 }
 
 /// Parse the dashboard HTML to extract user info.
 fn parse_dashboard_html(html: &str) -> Result<UserInfo, String> {
-    // The dashboard has rows with key-value pairs
     let get_val = |key: &str| -> Option<String> {
         let patterns = [format!("class='k'>{}</div>", key), format!("class=\"k\">{}</div>", key)];
         for pat in &patterns {
@@ -232,12 +261,10 @@ pub async fn get_plans(panel_url: &str, _session: &str) -> Result<PlansResponse,
         .map_err(|e| format!("plans request failed: {e}"))?;
     let html = resp.text().await.map_err(|e| format!("plans read failed: {e}"))?;
 
-    // Try JSON first
     if let Ok(plans) = serde_json::from_str::<PlansResponse>(&html) {
         return Ok(plans);
     }
 
-    // Parse HTML plans page
     let mut plans = Vec::new();
     for block in html.split("class='card'") {
         if block.contains("plan") || block.contains("پلن") {
@@ -265,20 +292,22 @@ fn extract_between<'a>(haystack: &'a str, start: &str, end: &str) -> Option<Stri
 
 /// Register/update the client's IP address with the panel.
 pub async fn claim_ip(panel_url: &str, _session: &str, ip: &str) -> Result<SimpleResponse, String> {
-    let url = format!("{}/", panel_url);
+    let url = format!("{}/register-ip", panel_url);
+    log_to_file(&format!("CLAIM_IP: url={}, ip={}", url, ip));
+
     let resp = http_client()
         .post(&url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
         .form(&[("ip", ip)])
         .send()
         .await
         .map_err(|e| format!("claim-ip request failed: {e}"))?;
-    let location = resp
-        .headers()
-        .get("location")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    if location.contains("e=1") {
+
+    let status = resp.status();
+    let final_url = resp.url().clone().to_string();
+    log_to_file(&format!("CLAIM_IP STATUS: {}, FINAL: {}", status, final_url));
+
+    if final_url.contains("e=1") {
         Ok(SimpleResponse { ok: false, message: Some("claim failed".into()) })
     } else {
         Ok(SimpleResponse { ok: true, message: Some("IP claimed".into()) })
