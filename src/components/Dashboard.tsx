@@ -548,7 +548,7 @@ export function Dashboard() {
         <span className="text-[10px]" style={{
                 color: "var(--muted)", fontFamily: "var(--mono)", letterSpacing: "0.12em",
               }}>
-          PeDitX© v0.3.19
+          PeDitX© v0.3.20
         </span>
       </div>
     </div>

@@ -204,9 +204,11 @@ fn proxy_status() -> ProxyStatus {
 async fn emergency_stop(state: tauri::State<'_, AppState>) -> Result<EmergencyStop, String> {
     // Before the stop: `connected` is what keeps nonce_loop alive.
     *state.connected.lock().unwrap() = false;
-    tokio::task::spawn_blocking(dns::emergency_stop)
+    // dns::emergency_stop returns the report itself, not a Result — the `?`
+    // only unwraps the JoinError, so the tail has to be wrapped back in Ok.
+    Ok(tokio::task::spawn_blocking(dns::emergency_stop)
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?)
 }
 
 // async + spawn_blocking: get_dns_status runs netsh twice (v4 and v6) and
@@ -272,13 +274,14 @@ fn show_main(app: &tauri::AppHandle) {
 /// state is ever carried across one.
 async fn do_connect(app: tauri::AppHandle, relay_ip: String) -> Result<String, String> {
     dns::start_dns_proxy(&relay_ip).await?;
+    // The clones must be bound inside the block: as a block-tail tuple the
+    // MutexGuard temporaries outlive `st` (E0597 — `st` does not live long enough).
     let (session, panel_url) = {
         let st = app.state::<AppState>();
         *st.connected.lock().unwrap() = true;
-        (
-            st.session.lock().unwrap().clone(),
-            st.panel_url.lock().unwrap().clone(),
-        )
+        let session = st.session.lock().unwrap().clone();
+        let panel_url = st.panel_url.lock().unwrap().clone();
+        (session, panel_url)
     };
     if let (Some(session), Some(panel_url)) = (session, panel_url) {
         tauri::async_runtime::spawn(nonce_loop(app, relay_ip.clone(), session, panel_url));
