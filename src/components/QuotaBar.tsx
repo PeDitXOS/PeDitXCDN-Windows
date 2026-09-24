@@ -1,4 +1,5 @@
 import { useAppStore } from "../store";
+import { IcDisk } from "./icons";
 
 export function QuotaBar() {
   const userInfo = useAppStore((s) => s.userInfo);
@@ -14,10 +15,11 @@ export function QuotaBar() {
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between">
-        <span className="text-[11px]" style={{ color: "var(--muted)" }}>
+        <span className="flex items-center gap-1.5 text-xs" style={{ color: "var(--muted)" }}>
+          <IcDisk size={13} />
           حجم باقیمانده: <b style={{ color }}>{Math.max(0, total - used).toFixed(1)} GB</b>
         </span>
-        <span className="text-[11px] font-medium">
+        <span className="text-xs font-medium">
           {used.toFixed(1)} / {total.toFixed(1)} GB
         </span>
       </div>

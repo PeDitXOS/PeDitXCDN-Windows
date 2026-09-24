@@ -231,3 +231,36 @@ pub async fn claim_ip(panel_url: &str, session: &str, ip: &str) -> Result<Simple
 
     Ok(SimpleResponse { ok: false, message: Some("claim failed".into()) })
 }
+
+/// Mint a single-use nonce for the address-change announcement.
+///
+/// The app drops it in a DNS query at the relay on UDP/5354 (the gate only
+/// filters port 53), the relay reads whatever address that query actually
+/// left from and registers that address for this account. Deliberately not
+/// the browser's address and deliberately not the previous one's: the
+/// address carrying the DNS is the address that has to be allowed.
+pub async fn mint_nonce(panel_url: &str, session: &str) -> Result<String, String> {
+    let url = format!("{}/nonce", panel_url);
+
+    let resp = http_client()
+        .post(&url)
+        .json(&serde_json::json!({"session": session}))
+        .send()
+        .await
+        .map_err(|e| format!("nonce request failed: {e}"))?;
+
+    let body = resp.text().await.unwrap_or_default();
+    let json: serde_json::Value =
+        serde_json::from_str(&body).map_err(|_| "nonce: bad json".to_string())?;
+
+    if json["ok"].as_bool().unwrap_or(false) {
+        if let Some(nonce) = json["nonce"].as_str() {
+            return Ok(nonce.to_string());
+        }
+        return Err("nonce: no nonce in reply".into());
+    }
+    Err(json["message"]
+        .as_str()
+        .unwrap_or("nonce failed")
+        .to_string())
+}

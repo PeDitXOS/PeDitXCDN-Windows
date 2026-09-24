@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { AppScreen, ConnectionStatus, UserInfo, Plan, DnsStatus } from "./types";
+import type { AppScreen, ConnectionStatus, UserInfo, Plan, DnsStatus, ProxyStatus } from "./types";
 
 interface AppState {
   // Navigation
@@ -22,9 +22,13 @@ interface AppState {
   connectionStatus: ConnectionStatus;
   relayIp: string | null;
   dnsStatus: DnsStatus | null;
+  // Backend's own answer, polled — `connectionStatus` alone happily kept
+  // saying «متصل» after a tray cut or a dead loop.
+  proxyStatus: ProxyStatus | null;
   setConnectionStatus: (s: ConnectionStatus) => void;
   setRelayIp: (ip: string | null) => void;
   setDnsStatus: (d: DnsStatus | null) => void;
+  setProxyStatus: (p: ProxyStatus | null) => void;
 
   // Error
   error: string | null;
@@ -66,9 +70,11 @@ export const useAppStore = create<AppState>((set) => ({
   connectionStatus: "disconnected",
   relayIp: null,
   dnsStatus: null,
+  proxyStatus: null,
   setConnectionStatus: (connectionStatus) => set({ connectionStatus }),
   setRelayIp: (relayIp) => set({ relayIp }),
   setDnsStatus: (dnsStatus) => set({ dnsStatus }),
+  setProxyStatus: (proxyStatus) => set({ proxyStatus }),
 
   error: null,
   setError: (error) => set({ error }),

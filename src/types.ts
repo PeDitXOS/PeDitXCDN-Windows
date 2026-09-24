@@ -57,3 +57,20 @@ export interface DnsStatus {
   interface: string;
   is_relay_dns: boolean;
 }
+
+/** Backend's view of the proxy — polled, never assumed. */
+export interface ProxyStatus {
+  running: boolean;
+  relay?: string | null;
+  uptime_secs: number;
+  v6: boolean;
+  fragment: boolean;
+}
+
+/** What the emergency cut actually did, read back from the system. */
+export interface EmergencyStop {
+  proxy_was_running: boolean;
+  dns_restored: boolean;
+  current_dns?: string | null;
+  ipv6_dns?: string | null;
+}

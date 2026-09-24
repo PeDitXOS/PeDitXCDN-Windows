@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store";
+import { IcUser, IcAt, IcLock, IcLogin } from "./icons";
 
 export function LoginScreen() {
   const { panelUrl, setPanelUrl, setSession, setScreen, setError } = useAppStore();
@@ -49,26 +50,30 @@ export function LoginScreen() {
   };
 
   return (
-    <div className="h-screen flex flex-col items-center justify-center p-6"
-         style={{ background: "var(--bg)" }}>
+    // No inline background: the body's grid + glow backdrop is the theme, and
+    // an opaque root would paint straight over it.
+    <div className="h-screen flex flex-col items-center justify-center p-6">
 
       {/* Background glow */}
       <div className="fixed inset-0 pointer-events-none"
            style={{
-             background: "radial-gradient(ellipse at 50% 30%, rgba(0,212,170,0.08) 0%, transparent 70%)",
+             background: "radial-gradient(ellipse at 50% 30%, rgba(33,169,255,0.08) 0%, transparent 70%)",
            }} />
 
       <div className="w-full max-w-sm space-y-6 relative z-10">
         {/* Logo */}
         <div className="text-center space-y-3">
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl overflow-hidden"
+          <div className="inline-flex items-center justify-center w-20 h-20 rounded overflow-hidden"
                style={{
-                 boxShadow: "0 8px 32px rgba(0,212,170,0.3)",
+                 boxShadow: "0 8px 32px rgba(33,169,255,0.3)",
                }}>
             <img src="/logo.png" alt="PeDitXCDN" className="w-full h-full object-cover" />
           </div>
           <div>
-            <h1 className="text-2xl font-bold" style={{ color: "var(--text)" }}>PeDitXCDN</h1>
+            <div className="flex items-center justify-center gap-2">
+              <h1 className="text-2xl font-bold" style={{ color: "var(--text)" }}>PeDitXCDN</h1>
+              <span className="hud-tag">gaming</span>
+            </div>
             <p className="text-sm mt-1" style={{ color: "var(--muted)" }}>سرویس DNS اشتراکی</p>
           </div>
         </div>
@@ -96,7 +101,10 @@ export function LoginScreen() {
 
           {mode === "signup" && (
             <div>
-              <label className="text-[11px] mb-1 block" style={{ color: "var(--muted)" }}>نام</label>
+              <label className="flex items-center gap-1.5 text-xs mb-1 block"
+                     style={{ color: "var(--muted)" }}>
+                <IcUser size={13} />نام
+              </label>
               <input
                 type="text"
                 value={name}
@@ -109,7 +117,10 @@ export function LoginScreen() {
           )}
 
           <div>
-            <label className="text-[11px] mb-1 block" style={{ color: "var(--muted)" }}>نام کاربری</label>
+            <label className="flex items-center gap-1.5 text-xs mb-1 block"
+                   style={{ color: "var(--muted)" }}>
+              <IcAt size={13} />نام کاربری
+            </label>
             <input
               type="text"
               value={username}
@@ -122,7 +133,10 @@ export function LoginScreen() {
           </div>
 
           <div>
-            <label className="text-[11px] mb-1 block" style={{ color: "var(--muted)" }}>رمز عبور</label>
+            <label className="flex items-center gap-1.5 text-xs mb-1 block"
+                   style={{ color: "var(--muted)" }}>
+              <IcLock size={13} />رمز عبور
+            </label>
             <input
               type="password"
               value={password}
@@ -135,7 +149,7 @@ export function LoginScreen() {
           </div>
 
           {localError && (
-            <div className="text-xs p-3 rounded-xl" style={{
+            <div className="text-xs p-3 rounded" style={{
               color: "var(--danger)",
               background: "rgba(255,71,87,0.1)",
               border: "1px solid rgba(255,71,87,0.2)",
@@ -145,7 +159,8 @@ export function LoginScreen() {
           )}
 
           <button type="submit" disabled={loading}
-                  className="btn-primary w-full py-3 text-sm">
+                  className="btn-primary w-full py-3 text-sm flex items-center justify-center gap-2">
+            <IcLogin size={15} />
             {loading ? "در حال پردازش..." : mode === "login" ? "ورود" : "ثبت‌نام"}
           </button>
 

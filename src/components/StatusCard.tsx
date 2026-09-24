@@ -1,14 +1,20 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store";
+import { IcDown, IcUp } from "./icons";
 
 const fmtRate = (bps: number) =>
   bps >= 1e6 ? `${(bps / 1e6).toFixed(1)} MB/s`
   : bps >= 1e3 ? `${(bps / 1e3).toFixed(0)} KB/s`
   : `${Math.round(bps)} B/s`;
 
+const fmtUptime = (s: number) =>
+  s < 60 ? `${s} ثانیه`
+  : s < 3600 ? `${Math.floor(s / 60)} دقیقه`
+  : `${Math.floor(s / 3600)} ساعت ${Math.floor((s % 3600) / 60)} دقیقه`;
+
 export function StatusCard() {
-  const { connectionStatus, relayIp, userInfo, error, dnsStatus } = useAppStore();
+  const { connectionStatus, relayIp, userInfo, error, dnsStatus, proxyStatus } = useAppStore();
   const [rate, setRate] = useState<{ recv: number; sent: number } | null>(null);
   const [probe, setProbe] = useState<
     | { kind: "ok"; a: string; viaRelay: boolean; aaaa: string; ms: number }
@@ -84,40 +90,58 @@ export function StatusCard() {
          style={{
            borderColor: statusColor[connectionStatus] || "var(--border)",
            boxShadow: connectionStatus === "connected"
-             ? "0 0 20px rgba(0,212,170,0.1)"
+             ? "0 0 20px rgba(33,169,255,0.1)"
              : "none",
          }}>
-      <div className="flex items-center justify-between">
-        <span className="text-xs" style={{ color: "var(--muted)" }}>وضعیت اتصال</span>
+      <div className="row">
+        <span className="k">وضعیت اتصال</span>
         <div className="flex items-center gap-2">
           <div className="status-ring" style={{
             background: statusColor[connectionStatus],
             boxShadow: `0 0 8px ${statusColor[connectionStatus]}`,
           }} />
-          <span className="text-xs font-medium" style={{ color: statusColor[connectionStatus] }}>
+          <span className="font-medium" style={{ color: statusColor[connectionStatus] }}>
             {statusLabel[connectionStatus]}
           </span>
         </div>
       </div>
 
       {relayIp && (
-        <div className="flex items-center justify-between">
-          <span className="text-xs" style={{ color: "var(--muted)" }}>آی‌پی رله</span>
-          <span className="font-mono text-xs" style={{ color: "var(--text)" }}>{relayIp}</span>
+        <div className="row">
+          <span className="k">آی‌پی رله</span>
+          <span className="v font-mono">{relayIp}</span>
+        </div>
+      )}
+
+      {/* Straight from the running loops: proof the backend agrees we are
+          up, and how long it has been — not a flag the UI set itself. */}
+      {proxyStatus?.running && (
+        <div className="row">
+          <span className="k">مدت فعالیت پروکسی</span>
+          <span className="v font-mono">
+            {fmtUptime(proxyStatus.uptime_secs)}
+            {proxyStatus.v6 ? "  · دو پشته" : ""}
+          </span>
         </div>
       )}
 
       {rate && (
         <div className="grid grid-cols-2 gap-2 pt-1">
           <div className="stat-card">
-            <div className="stat-value text-sm" style={{ color: "var(--success)" }}>
-              ↓ {fmtRate(rate.recv)}
+            <div className="flex items-center justify-center gap-1.5" style={{ color: "var(--success)" }}>
+              <IcDown size={14} />
+              <span className="stat-value text-sm" style={{ color: "var(--success)" }}>
+                {fmtRate(rate.recv)}
+              </span>
             </div>
             <div className="stat-label">دانلود</div>
           </div>
           <div className="stat-card">
-            <div className="stat-value text-sm" style={{ color: "var(--p)" }}>
-              ↑ {fmtRate(rate.sent)}
+            <div className="flex items-center justify-center gap-1.5" style={{ color: "var(--p)" }}>
+              <IcUp size={14} />
+              <span className="stat-value text-sm" style={{ color: "var(--p)" }}>
+                {fmtRate(rate.sent)}
+              </span>
             </div>
             <div className="stat-label">آپلود</div>
           </div>
@@ -125,18 +149,16 @@ export function StatusCard() {
       )}
 
       {dnsStatus?.current_dns && (
-        <div className="flex items-center justify-between">
-          <span className="text-xs" style={{ color: "var(--muted)" }}>DNS فعلی</span>
-          <span className="font-mono text-xs" style={{ color: "var(--text)" }}>
-            {dnsStatus.current_dns}
-          </span>
+        <div className="row">
+          <span className="k">DNS فعلی</span>
+          <span className="v font-mono">{dnsStatus.current_dns}</span>
         </div>
       )}
 
       {dnsStatus?.ipv6_dns && (
-        <div className="flex items-center justify-between">
-          <span className="text-xs" style={{ color: "var(--muted)" }}>DNS شش‌خانه</span>
-          <span className="font-mono text-xs" style={{
+        <div className="row">
+          <span className="k">DNS شش‌خانه</span>
+          <span className="v font-mono" style={{
             color: dnsStatus.ipv6_dns === "::1" ? "var(--success)" : "var(--warn)",
           }}>
             {dnsStatus.ipv6_dns}{dnsStatus.ipv6_dns === "::1" ? "  ✓" : "  ⚠"}
@@ -146,11 +168,9 @@ export function StatusCard() {
 
       {connectionStatus === "connected" && (
         <div className="space-y-1 pt-1">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>
-              تست DNS محلی (A)
-            </span>
-            <span className="font-mono text-xs truncate" style={{
+          <div className="row">
+            <span className="k">تست DNS محلی (A)</span>
+            <span className="v font-mono" style={{
               color: !probe ? "var(--muted)"
                 : probe.kind === "err" ? "var(--danger)"
                 : probe.viaRelay ? "var(--success)" : "var(--warn)",
@@ -163,11 +183,9 @@ export function StatusCard() {
             </span>
           </div>
           {probe?.kind === "ok" && (
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>
-                IPv6 (AAAA)
-              </span>
-              <span className="font-mono text-xs truncate" style={{
+            <div className="row">
+              <span className="k">IPv6 (AAAA)</span>
+              <span className="v font-mono" style={{
                 color: probe.aaaa ? "var(--warn)" : "var(--success)",
               }}>
                 {probe.aaaa
@@ -180,14 +198,14 @@ export function StatusCard() {
       )}
 
       {userInfo?.name && (
-        <div className="flex items-center justify-between">
-          <span className="text-xs" style={{ color: "var(--muted)" }}>کاربر</span>
-          <span className="text-xs" style={{ color: "var(--text)" }}>{userInfo.name}</span>
+        <div className="row">
+          <span className="k">کاربر</span>
+          <span className="v">{userInfo.name}</span>
         </div>
       )}
 
       {error && (
-        <div className="text-xs p-2 rounded-lg" style={{
+        <div className="text-xs p-2 rounded" style={{
           color: "var(--danger)",
           background: "rgba(255,71,87,0.1)",
           border: "1px solid rgba(255,71,87,0.2)",

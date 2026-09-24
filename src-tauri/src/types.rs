@@ -76,3 +76,27 @@ pub struct LocalResolve {
     pub aaaa: Vec<String>,
     pub ms: u64,
 }
+
+/// Backend's view of the proxy, straight from the running loops — no netsh,
+/// so it can be polled every second without freezing anything.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyStatus {
+    pub running: bool,
+    pub relay: Option<String>,
+    pub uptime_secs: u64,
+    pub v6: bool,
+    pub fragment: bool,
+}
+
+/// What the emergency cut actually did, read back from the system rather
+/// than assumed. `dns_restored` is *verified* restoration: false both when a
+/// netsh failed and left 127.0.0.1 behind, and when the system could not be
+/// read at all — the caller tells those apart by whether the addresses came
+/// back (`None` addresses = unknown). Neither may be shown as success.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmergencyStop {
+    pub proxy_was_running: bool,
+    pub dns_restored: bool,
+    pub current_dns: Option<String>,
+    pub ipv6_dns: Option<String>,
+}

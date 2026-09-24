@@ -1,4 +1,5 @@
-use crate::types::{DnsStatus, LocalResolve};
+use crate::types::{DnsStatus, EmergencyStop, LocalResolve, ProxyStatus};
+use crate::wireproxy;
 use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::Mutex;
@@ -13,6 +14,25 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// accept loop — which never watched it at all — kept port 53 bound.
 /// Wrapped in Mutex<Option<>> so it can be replaced on each start.
 static SHUTDOWN: Mutex<Option<watch::Sender<bool>>> = Mutex::new(None);
+
+// ─── Service state ────────────────────────────────────────────────────
+
+/// What is actually running right now. The webview keeps its own
+/// `connected` flag, which happily kept saying «متصل» after the loops were
+/// gone — control has to ask the backend, and it has to be cheap enough to
+/// poll every second (this is a Mutex read, no netsh).
+static PROXY_STATE: Mutex<Option<ProxyState>> = Mutex::new(None);
+
+/// Last relay we started with, so the tray's «اتصال» can restart the proxy
+/// without a round-trip through the webview.
+static LAST_RELAY: Mutex<Option<String>> = Mutex::new(None);
+
+struct ProxyState {
+    relay: String,
+    started: std::time::Instant,
+    v6: bool,
+    fragment: bool,
+}
 
 // ─── System DNS helpers (netsh) ───────────────────────────────────────
 
@@ -370,7 +390,10 @@ async fn forward_best(packet: &[u8], relay: SocketAddr) -> Result<Vec<u8>, Strin
 }
 
 /// Handle one TCP DNS connection: read length-prefixed message, forward, reply.
-async fn handle_tcp(mut client: TcpStream, relay: SocketAddr) {
+/// `rewrite` (set only while the local wire listeners are up) swaps the
+/// relay's own A answers for 127.0.0.1 so the app connects to our local
+/// listeners instead of straight to the relay.
+async fn handle_tcp(mut client: TcpStream, relay: SocketAddr, rewrite: Option<[u8; 4]>) {
     let mut len_buf = [0u8; 2];
     if client.read_exact(&mut len_buf).await.is_err() {
         return;
@@ -382,13 +405,16 @@ async fn handle_tcp(mut client: TcpStream, relay: SocketAddr) {
         return;
     }
 
-    let response = match nodata_aaaa(&msg) {
+    let mut response = match nodata_aaaa(&msg) {
         Some(r) => r,
         None => match forward_tcp_raw(&msg, relay).await {
             Ok(r) => r,
             Err(_) => return,
         },
     };
+    if let Some(from) = rewrite {
+        wireproxy::rewrite_relay_a(&mut response, from, [127, 0, 0, 1]);
+    }
 
     let resp_len = (response.len() as u16).to_be_bytes();
     let _ = client.write_all(&resp_len).await;
@@ -469,14 +495,21 @@ fn bind_error(proto: &str, e: std::io::Error) -> String {
 
 /// TCP accept loop for one listener. Watches shutdown — otherwise it keeps
 /// port 53 bound after disconnect and the next connect fails.
-fn spawn_tcp_loop(lst: TcpListener, relay: SocketAddr, mut stop: watch::Receiver<bool>) {
+fn spawn_tcp_loop(
+    lst: TcpListener,
+    relay: SocketAddr,
+    rewrite: Option<[u8; 4]>,
+    mut stop: watch::Receiver<bool>,
+) {
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 accepted = lst.accept() => {
                     match accepted {
                         Ok((stream, _)) => {
-                            tokio::spawn(async move { handle_tcp(stream, relay).await; });
+                            tokio::spawn(async move {
+                                handle_tcp(stream, relay, rewrite).await
+                            });
                         }
                         Err(e) => {
                             eprintln!("[PeDitXCDN] TCP accept error: {e}");
@@ -491,7 +524,12 @@ fn spawn_tcp_loop(lst: TcpListener, relay: SocketAddr, mut stop: watch::Receiver
 }
 
 /// UDP forward loop for one socket; AAAA is answered locally (nodata_aaaa).
-fn spawn_udp_loop(sock: std::sync::Arc<UdpSocket>, relay: SocketAddr, mut stop: watch::Receiver<bool>) {
+fn spawn_udp_loop(
+    sock: std::sync::Arc<UdpSocket>,
+    relay: SocketAddr,
+    rewrite: Option<[u8; 4]>,
+    mut stop: watch::Receiver<bool>,
+) {
     tokio::spawn(async move {
         let mut recv_buf = [0u8; 4096];
         loop {
@@ -506,7 +544,14 @@ fn spawn_udp_loop(sock: std::sync::Arc<UdpSocket>, relay: SocketAddr, mut stop: 
                                 return;
                             }
                             match forward_best(&packet, relay).await {
-                                Ok(response) => {
+                                Ok(mut response) => {
+                                    if let Some(from) = rewrite {
+                                        wireproxy::rewrite_relay_a(
+                                            &mut response,
+                                            from,
+                                            [127, 0, 0, 1],
+                                        );
+                                    }
                                     let _ = s.send_to(&response, peer).await;
                                 }
                                 Err(e) => {
@@ -525,6 +570,123 @@ fn spawn_udp_loop(sock: std::sync::Arc<UdpSocket>, relay: SocketAddr, mut stop: 
                     eprintln!("[PeDitXCDN] DNS proxy stopped");
                     break;
                 }
+            }
+        }
+    });
+}
+
+// ─── Local wire listeners (anti-DPI path) ─────────────────────────────
+// Rewritten answers send the app to 127.0.0.1; these ports are where that
+// traffic lands. Every one splices to the same port on the relay, so the
+// relay and exit configs need no change at all.
+
+/// One local port and its relay-side twin. `fragment` splits the first TLS
+/// record (the ClientHello, the only one DPI can match SNI in) into 16-byte
+/// pieces before splicing the rest untouched.
+struct WirePort {
+    listen: u16,
+    relay_port: u16,
+    fragment: bool,
+}
+
+/// 8443 is not optional: the panel host's public address *is* the relay
+/// IP, so without a local 8443 the rewritten dashboard/API traffic would
+/// dead-end at a port nothing is listening on.
+const WIRE_PORTS: [WirePort; 4] = [
+    WirePort { listen: 80, relay_port: 80, fragment: false },
+    WirePort { listen: 443, relay_port: 443, fragment: true },
+    WirePort { listen: 1119, relay_port: 1119, fragment: false },
+    WirePort { listen: 8443, relay_port: 8443, fragment: true },
+];
+
+/// Bind every wire port or none of them. All-or-nothing on purpose: port
+/// 80 or 443 is occasionally held by something else on a dev machine
+/// (IIS, SQL Reporting), and a half-open set would rewrite answers into a
+/// black hole. One busy port and the whole feature stays off — the proxy
+/// then behaves exactly as it did before.
+async fn bind_wire_ports() -> Result<Vec<(TcpListener, WirePort)>, String> {
+    let mut bound = Vec::new();
+    for port in WIRE_PORTS {
+        match TcpListener::bind(("127.0.0.1", port.listen)).await {
+            Ok(lst) => bound.push((lst, port)),
+            Err(e) => {
+                drop(bound);
+                return Err(format!("local :{} busy ({e})", port.listen));
+            }
+        }
+    }
+    Ok(bound)
+}
+
+/// One accepted local connection: connect upstream first, optionally
+/// re-send the client's first TLS record in fragments, then splice.
+async fn handle_wire(mut client: TcpStream, mut up: TcpStream, fragment: bool) {
+    up.set_nodelay(true).ok();
+    if fragment {
+        let mut hdr = [0u8; 5];
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            client.read_exact(&mut hdr),
+        )
+        .await;
+        match read {
+            // tokio's read_exact yields io::Result<usize>, not () like std's —
+            // `Ok(Ok(()))` never matched and the whole fragment path was dead.
+            Ok(Ok(_)) => match wireproxy::tls_record_payload(&hdr) {
+                Some(len) => {
+                    let mut body = vec![0u8; len];
+                    if client.read_exact(&mut body).await.is_err() {
+                        return;
+                    }
+                    if up.write_all(&hdr).await.is_err() {
+                        return;
+                    }
+                    let mut at = 0usize;
+                    for sz in wireproxy::fragment_sizes(len, 16) {
+                        if up.write_all(&body[at..at + sz]).await.is_err() {
+                            return;
+                        }
+                        at += sz;
+                    }
+                }
+                None => {
+                    // Not a splittable handshake record (TLS 1.3 compatibility
+                    // cases, or something that is not TLS at all): the header
+                    // is already consumed, so hand it back verbatim and splice.
+                    if up.write_all(&hdr).await.is_err() {
+                        return;
+                    }
+                }
+            },
+            _ => return,
+        }
+    }
+    let _ = tokio::io::copy_bidirectional(&mut client, &mut up).await;
+}
+
+/// Accept loop for one wire port — same watch-based shutdown as the DNS
+/// loops, so disconnect actually frees 80/443 for the next connect.
+fn spawn_wire_loop(lst: TcpListener, up: SocketAddr, fragment: bool, mut stop: watch::Receiver<bool>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                accepted = lst.accept() => {
+                    match accepted {
+                        Ok((client, _)) => {
+                            tokio::spawn(async move {
+                                match TcpStream::connect(up).await {
+                                    Ok(upstream) => handle_wire(client, upstream, fragment).await,
+                                    Err(e) => eprintln!("[PeDitXCDN] wire upstream {up}: {e}"),
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("[PeDitXCDN] wire accept error: {e}");
+                            break;
+                        }
+                    }
+                }
+                _ = stop.changed() => break,
             }
         }
     });
@@ -559,6 +721,27 @@ async fn start_proxy(relay_ip: String) -> Result<(), String> {
     let udp6 = UdpSocket::bind("[::1]:53").await.ok();
     let tcp6 = TcpListener::bind("[::1]:53").await.ok();
 
+    // Local wire listeners — bound *before* system DNS switches, so a busy
+    // port is discovered while nothing has been pointed at us yet.
+    let wire = match bind_wire_ports().await {
+        Ok(v) => v,
+        Err(e) => {
+            crate::api::log_to_file(&format!("WIREPROXY OFF: {e}"));
+            eprintln!("[PeDitXCDN] wire listeners off: {e}");
+            Vec::new()
+        }
+    };
+    let relay_v4 = match relay_addr.ip() {
+        std::net::IpAddr::V4(v4) => Some(v4.octets()),
+        std::net::IpAddr::V6(_) => None,
+    };
+    // Rewrite only when the local listeners that consume the rewritten
+    // address actually came up — otherwise 127.0.0.1:443 would be a hole.
+    let rewrite = match (wire.is_empty(), relay_v4) {
+        (false, Some(v4)) => Some(v4),
+        _ => None,
+    };
+
     // Change system DNS to localhost — off the runtime thread: the netsh
     // loop is several blocking spawns (~0.5s each) and awaiting it inline
     // starved the runtime that also drives the window.
@@ -568,27 +751,41 @@ async fn start_proxy(relay_ip: String) -> Result<(), String> {
         .map_err(|e| e.to_string())??;
 
     eprintln!(
-        "[PeDitXCDN] DNS proxy started: 127.0.0.1:53{} -> {}:53",
+        "[PeDitXCDN] DNS proxy started: 127.0.0.1:53{} -> {}:53 (fragment: {})",
         if udp6.is_some() { " + [::1]:53" } else { "" },
-        relay_ip
+        relay_ip,
+        if rewrite.is_some() { "on" } else { "off" },
     );
 
     crate::api::log_to_file(&format!(
-        "PROXY START 127.0.0.1:53{} -> {relay_ip}:53",
-        if proxy_v6 { " + [::1]:53" } else { "" }
+        "PROXY START 127.0.0.1:53{} -> {relay_ip}:53 fragment={}",
+        if proxy_v6 { " + [::1]:53" } else { "" },
+        if rewrite.is_some() { "on" } else { "off" },
     ));
 
     // Store shutdown sender
     *SHUTDOWN.lock().unwrap() = Some(shutdown_tx);
+    *LAST_RELAY.lock().unwrap() = Some(relay_ip.clone());
+    *PROXY_STATE.lock().unwrap() = Some(ProxyState {
+        relay: relay_ip.clone(),
+        started: std::time::Instant::now(),
+        v6: proxy_v6,
+        fragment: rewrite.is_some(),
+    });
 
-    spawn_tcp_loop(tcp, relay_addr, shutdown_rx.clone());
-    spawn_udp_loop(std::sync::Arc::new(udp), relay_addr, shutdown_rx.clone());
+    spawn_tcp_loop(tcp, relay_addr, rewrite, shutdown_rx.clone());
+    spawn_udp_loop(std::sync::Arc::new(udp), relay_addr, rewrite, shutdown_rx.clone());
     if let Some(s) = udp6 {
-        spawn_udp_loop(std::sync::Arc::new(s), relay_addr, shutdown_rx.clone());
+        spawn_udp_loop(std::sync::Arc::new(s), relay_addr, rewrite, shutdown_rx.clone());
     }
     if let Some(l) = tcp6 {
-        spawn_tcp_loop(l, relay_addr, shutdown_rx);
+        spawn_tcp_loop(l, relay_addr, rewrite, shutdown_rx.clone());
     }
+    for (lst, port) in wire {
+        let up: SocketAddr = (relay_addr.ip(), port.relay_port).into();
+        spawn_wire_loop(lst, up, port.fragment, shutdown_rx.clone());
+    }
+    drop(shutdown_rx);
 
     Ok(())
 }
@@ -598,6 +795,9 @@ async fn stop_proxy_inner() {
     // Send shutdown signal (sync — watch::Sender::send needs no await)
     let tx = SHUTDOWN.lock().unwrap().take();
     let had_proxy = tx.is_some();
+    // Cleared unconditionally: a stop means "not running", even when the
+    // sender was already gone (a crash left no sender but did leave state).
+    *PROXY_STATE.lock().unwrap() = None;
     if let Some(tx) = &tx {
         let _ = tx.send(true);
         // Wait briefly for tasks to exit
@@ -619,17 +819,22 @@ async fn stop_proxy_inner() {
     }
 }
 
+/// True when a status snapshot still points the system at our own proxy.
+/// One definition for the three places that need it (the emergency cut, the
+/// connect-time check below, and the startup stale-DNS sweep in lib.rs): a
+/// mismatch between them is exactly how a killed session stayed pointed at a
+/// dead 127.0.0.1 and broke the next login.
+pub fn points_at_proxy(st: &DnsStatus) -> bool {
+    st.current_dns.as_deref() == Some("127.0.0.1") || st.ipv6_dns.as_deref() == Some("::1")
+}
+
 /// True when the system is pointed at our own (now possibly dead) proxy.
 async fn dns_points_at_proxy() -> bool {
     let st = tokio::task::spawn_blocking(get_dns_status)
         .await
         .ok()
         .and_then(|r| r.ok());
-    matches!(
-        st,
-        Some(s) if s.current_dns.as_deref() == Some("127.0.0.1")
-            || s.ipv6_dns.as_deref() == Some("::1")
-    )
+    matches!(st, Some(s) if points_at_proxy(&s))
 }
 
 // ─── Public API (called from Tauri commands) ──────────────────────────
@@ -653,9 +858,83 @@ pub fn stop_dns_proxy() {
         // "port 53 is in use" — our own listener from a moment ago.
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
+    *PROXY_STATE.lock().unwrap() = None;
     // Restore DNS directly (sync, no tokio needed)
     let _ = restore_system_dns();
     eprintln!("[PeDitXCDN] DNS proxy stopped, system DNS restored to DHCP");
+}
+
+/// Cheap, in-memory service status — no netsh, no sockets. Safe to poll
+/// every second; this is what the UI's «connected» actually follows now.
+pub fn proxy_status() -> ProxyStatus {
+    let st = PROXY_STATE.lock().unwrap();
+    match &*st {
+        Some(s) => ProxyStatus {
+            running: true,
+            relay: Some(s.relay.clone()),
+            uptime_secs: s.started.elapsed().as_secs(),
+            v6: s.v6,
+            fragment: s.fragment,
+        },
+        None => ProxyStatus {
+            running: false,
+            relay: None,
+            uptime_secs: 0,
+            v6: false,
+            fragment: false,
+        },
+    }
+}
+
+/// Relay the last successful start used — the tray's restart needs it
+/// without asking the webview.
+pub fn last_relay() -> Option<String> {
+    LAST_RELAY.lock().unwrap().clone()
+}
+
+/// Emergency cut: stop every loop, then force DHCP back on both stacks
+/// whether or not the proxy believed it was running. Certainty beats the
+/// v0.3.18 idle fast-path here — this is the button pressed *because* DNS
+/// is already broken, so it must not skip the restore to save 0.5 s.
+/// Blocking (~1–2 s of netsh): the command runs it on a worker thread, the
+/// tray on a detached one; neither may sit on the core thread.
+pub fn emergency_stop() -> EmergencyStop {
+    let was_running = SHUTDOWN.lock().unwrap().take().is_some();
+    *PROXY_STATE.lock().unwrap() = None;
+    // Let the accept/recv loops drop their sockets before anyone rebinds :53.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let _ = restore_system_dns();
+
+    // Report what the system *says*, not what we intended: a netsh that
+    // failed mid-loop leaves 127.0.0.1 pointing at a dead proxy, and the UI
+    // has to be able to see that instead of showing a green tick. An
+    // unreadable system counts as *not* verified — a green tick we did not
+    // witness is worse than a warning.
+    let st = get_dns_status().ok();
+    let dns_restored = match &st {
+        None => false,
+        Some(s) => !points_at_proxy(s),
+    };
+    let (current_dns, ipv6_dns) = match st {
+        Some(s) => (s.current_dns, s.ipv6_dns),
+        None => (None, None),
+    };
+
+    let _ = crate::api::log_to_file(&format!(
+        "EMERGENCY STOP running={was_running} dns={} ipv6={} restored={dns_restored}",
+        current_dns.as_deref().unwrap_or("?"),
+        ipv6_dns.as_deref().unwrap_or("?"),
+    ));
+    eprintln!(
+        "[PeDitXCDN] emergency stop: running={was_running} restored={dns_restored}"
+    );
+
+    EmergencyStop {
+        proxy_was_running: was_running,
+        dns_restored,
+        current_dns,
+        ipv6_dns,
+    }
 }
 
 /// Stop the DNS proxy + restore system DNS (async version for non-tokio threads).
@@ -814,11 +1093,39 @@ pub fn resolve_relay_ip(panel_url: &str) -> Result<String, String> {
     if host.parse::<std::net::Ipv4Addr>().is_ok() {
         return Ok(host);
     }
-    (host.as_str(), 443u16)
+    // While connected, the system resolver *is* our proxy, and the rewrite
+    // turns the panel host's answer into 127.0.0.1 — adopting that would
+    // point the relay at itself. Any non-loopback answer wins outright; if
+    // every answer is loopback the rewrite did it, so ask upstream directly.
+    let local: Vec<std::net::Ipv4Addr> = (host.as_str(), 443u16)
         .to_socket_addrs()
         .map_err(|e| format!("cannot resolve panel host {host}: {e}"))?
-        .find(|addr| addr.is_ipv4())
-        .map(|addr| addr.ip().to_string())
+        .filter_map(|addr| match addr.ip() {
+            std::net::IpAddr::V4(v4) => Some(v4),
+            std::net::IpAddr::V6(_) => None,
+        })
+        .collect();
+    for v4 in &local {
+        if !wireproxy::is_loopback_v4(v4.octets()) {
+            return Ok(v4.to_string());
+        }
+    }
+    // ponytail: two fixed public resolvers; a per-config upstream list is
+    // the upgrade if both ever get filtered on a given network.
+    for resolver in ["8.8.8.8:53", "1.1.1.1:53"] {
+        if let Ok(ips) = query_addrs(resolver, &host, QTYPE_A) {
+            for ip in ips {
+                if let Ok(v4) = ip.parse::<std::net::Ipv4Addr>() {
+                    if !wireproxy::is_loopback_v4(v4.octets()) {
+                        return Ok(v4.to_string());
+                    }
+                }
+            }
+        }
+    }
+    local
+        .first()
+        .map(|v4| v4.to_string())
         .ok_or_else(|| format!("no IPv4 address for {host}"))
 }
 

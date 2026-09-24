@@ -1,17 +1,25 @@
 mod api;
 mod dns;
 mod types;
+mod wireproxy;
 
 use std::sync::Mutex;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager,
+    Manager,
 };
-use types::{DnsStatus, LocalResolve, LoginResponse, PlansResponse, SimpleResponse, UserInfo};
+use types::{
+    DnsStatus, EmergencyStop, LocalResolve, LoginResponse, PlansResponse, ProxyStatus,
+    SimpleResponse, UserInfo,
+};
 
 struct AppState {
     connected: Mutex<bool>,
+    // Off unless the customer ticks the dashboard box. An always-on claim
+    // would evict the account's address from any other device they use
+    // (max_ips=1), so opting out has to mean this machine never claims it.
+    auto_register: Mutex<bool>,
     session: Mutex<Option<String>>,
     panel_url: Mutex<Option<String>>,
 }
@@ -93,17 +101,112 @@ async fn claim_ip(
 // waits on several netsh spawns — sync meant the window froze ("Not
 // responding") for the whole Connect press. Locks are taken after the await.
 #[tauri::command]
-async fn connect(state: tauri::State<'_, AppState>, relay_ip: String) -> Result<String, String> {
-    dns::start_dns_proxy(&relay_ip).await?;
-    *state.connected.lock().unwrap() = true;
-    Ok(relay_ip)
+async fn connect(app: tauri::AppHandle, relay_ip: String) -> Result<String, String> {
+    do_connect(app, relay_ip).await
+}
+
+/// Keep the relay's idea of this account's address current, while connected.
+///
+/// Every 15 s: mint a nonce, drop it in a DNS query at the relay on
+/// UDP/5354, and the relay registers whatever address that query actually
+/// left from - so a customer who changes IP twenty times a day is let back
+/// in within seconds each time, with no manual registration and no memory
+/// of what the address used to be. Stops when Disconnect flips `connected`,
+/// and stays idle while the dashboard's auto-register tick is off - that tick
+/// is what lets a customer hand the account to another device.
+async fn nonce_loop(
+    app: tauri::AppHandle,
+    relay_ip: String,
+    session: String,
+    panel_url: String,
+) {
+    let mut fails: u32 = 0;
+    loop {
+        let st = app.state::<AppState>();
+        let still = *st.connected.lock().unwrap();
+        if !still {
+            break;
+        }
+        if !*st.auto_register.lock().unwrap() {
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            continue;
+        }
+        match api::mint_nonce(&panel_url, &session).await {
+            Ok(nonce) => {
+                fails = 0;
+                if let Err(e) = send_nonce(&relay_ip, &nonce) {
+                    api::log_to_file(&format!("NONCE udp to {relay_ip}: {e}"));
+                }
+            }
+            Err(e) => {
+                fails += 1;
+                // One line while it may be a blip, one line an hour once it
+                // is not - this runs every 15 s for the whole session.
+                if fails == 1 || fails % 240 == 0 {
+                    api::log_to_file(&format!("NONCE mint failed ({fails}): {e}"));
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+    }
+}
+
+/// Fire-and-forget wire format: a DNS query whose first label is "n" plus
+/// the 32-hex nonce. No reply is waited for - the next tick re-asserts, and
+/// /user-info shows the registered address whenever the user looks.
+fn send_nonce(relay_ip: &str, nonce: &str) -> std::io::Result<()> {
+    use std::net::UdpSocket;
+    let label = format!("n{nonce}");
+    if label.len() > 63 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "nonce too long",
+        ));
+    }
+    let mut pkt = vec![0u8; 12];
+    pkt[2] = 0x01; // recursion desired
+    pkt[5] = 0x01; // one question
+    pkt.push(label.len() as u8);
+    pkt.extend_from_slice(label.as_bytes());
+    pkt.push(0);
+    pkt.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]); // A, IN
+    let sock = UdpSocket::bind("0.0.0.0:0")?;
+    sock.send_to(&pkt, (relay_ip, 5354))?;
+    Ok(())
+}
+
+/// Dashboard tick: claim this machine's address automatically or not. Pushed
+/// from the webview on mount and on every toggle; the mount-time claim and
+/// `nonce_loop` both read it.
+#[tauri::command]
+fn set_auto_register(state: tauri::State<'_, AppState>, on: bool) {
+    *state.auto_register.lock().unwrap() = on;
 }
 
 #[tauri::command]
-async fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    dns::stop_dns_proxy_async().await;
+async fn disconnect(app: tauri::AppHandle) -> Result<(), String> {
+    do_disconnect(app).await
+}
+
+/// Real service state — a Mutex read, so the dashboard can poll it every
+/// second and stop trusting its own `connected` flag (which kept saying
+/// «متصل» after a tray cut or a dead loop).
+#[tauri::command]
+fn proxy_status() -> ProxyStatus {
+    dns::proxy_status()
+}
+
+/// One-key emergency cut: stop the loops and force DHCP back on both
+/// stacks, then report what the system actually ended up with.
+/// spawn_blocking — the restore is a multi-interface netsh loop plus
+/// flushdns and must not sit on the core thread (the v0.3.15 lesson).
+#[tauri::command]
+async fn emergency_stop(state: tauri::State<'_, AppState>) -> Result<EmergencyStop, String> {
+    // Before the stop: `connected` is what keeps nonce_loop alive.
     *state.connected.lock().unwrap() = false;
-    Ok(())
+    tokio::task::spawn_blocking(dns::emergency_stop)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 // async + spawn_blocking: get_dns_status runs netsh twice (v4 and v6) and
@@ -153,31 +256,98 @@ fn logout(state: tauri::State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Bring the window back from the tray (menu item and icon click both).
+fn show_main(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
+/// Shared by the `connect` command and the tray's «اتصال» — the tray path
+/// has to start nonce_loop too, or auto-registration silently dies on a
+/// reconnect that didn't come from the button. Takes the AppHandle, not a
+/// `&AppState`: the tray has no `tauri::State`, and the state access here
+/// lives in a scope that ends before any await, so no borrow of the managed
+/// state is ever carried across one.
+async fn do_connect(app: tauri::AppHandle, relay_ip: String) -> Result<String, String> {
+    dns::start_dns_proxy(&relay_ip).await?;
+    let (session, panel_url) = {
+        let st = app.state::<AppState>();
+        *st.connected.lock().unwrap() = true;
+        (
+            st.session.lock().unwrap().clone(),
+            st.panel_url.lock().unwrap().clone(),
+        )
+    };
+    if let (Some(session), Some(panel_url)) = (session, panel_url) {
+        tauri::async_runtime::spawn(nonce_loop(app, relay_ip.clone(), session, panel_url));
+    }
+    Ok(relay_ip)
+}
+
+async fn do_disconnect(app: tauri::AppHandle) -> Result<(), String> {
+    dns::stop_dns_proxy_async().await;
+    *app.state::<AppState>().connected.lock().unwrap() = false;
+    Ok(())
+}
+
 fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    let connect = MenuItem::with_id(app, "connect", "Connect", true, None::<&str>)?;
-    let disconnect = MenuItem::with_id(app, "disconnect", "Disconnect", true, None::<&str>)?;
-    let separator = PredefinedMenuItem::separator(app)?;
-    let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
-    let separator2 = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let connect = MenuItem::with_id(app, "connect", "اتصال", true, None::<&str>)?;
+    let disconnect = MenuItem::with_id(app, "disconnect", "قطع اتصال", true, None::<&str>)?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
+    let emergency = MenuItem::with_id(app, "emergency", "قطع اضطراری", true, None::<&str>)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    let show = MenuItem::with_id(app, "show", "نمایش", true, None::<&str>)?;
+    let sep3 = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "quit", "خروج", true, None::<&str>)?;
 
     let menu = Menu::with_items(app, &[
-        &connect, &disconnect, &separator, &show, &separator2, &quit,
+        &connect, &disconnect, &sep1, &emergency, &sep2, &show, &sep3, &quit,
     ])?;
 
     let _tray = TrayIconBuilder::new()
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&menu)
         .tooltip("PeDitXCDN")
+        // Every item runs here, in the backend, rather than emitting an
+        // event for the webview to answer: the old `tray-connect` /
+        // `tray-disconnect` pair had no listener (a menu that does
+        // nothing), and the emergency cut has to work with a hung webview.
+        // The dashboard's 1 s `proxy_status` poll is what reflects all of
+        // this back into the UI.
         .on_menu_event(move |app, event| match event.id().as_ref() {
-            "connect" => { let _ = app.emit("tray-connect", ()); }
-            "disconnect" => { let _ = app.emit("tray-disconnect", ()); }
-            "show" => {
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
+            "connect" => {
+                let relay = dns::last_relay();
+                if let Some(relay) = relay {
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = do_connect(app, relay).await;
+                    });
+                } else {
+                    // Nothing to reconnect to in this session — show the
+                    // window so the user can press Connect there instead of
+                    // clicking a menu item that silently did nothing.
+                    show_main(app);
                 }
             }
+            "disconnect" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = do_disconnect(app).await;
+                });
+            }
+            "emergency" => {
+                // On its own thread: the restore is seconds of netsh and
+                // must not wedge the menu, and `connected` flips first so
+                // nonce_loop stops talking to the relay.
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    *app.state::<AppState>().connected.lock().unwrap() = false;
+                    dns::emergency_stop();
+                });
+            }
+            "show" => show_main(app),
             "quit" => {
                 // Restore DNS before exiting
                 dns::stop_dns_proxy();
@@ -192,11 +362,7 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>>
                 ..
             } = event
             {
-                let app = tray.app_handle();
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+                show_main(tray.app_handle());
             }
         })
         .build(app)?;
@@ -294,6 +460,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             connected: Mutex::new(false),
+            auto_register: Mutex::new(false),
             session: Mutex::new(None),
             panel_url: Mutex::new(None),
         })
@@ -307,9 +474,8 @@ pub fn run() {
             // leftover 127.0.0.1, and get_dns_status used to report neither.
             std::thread::spawn(|| {
                 if let Ok(status) = dns::get_dns_status() {
-                    if status.current_dns.as_deref() == Some("127.0.0.1")
-                        || status.ipv6_dns.as_deref() == Some("::1")
-                    {
+                    // Same predicate as the emergency cut — they cannot disagree.
+                    if dns::points_at_proxy(&status) {
                         eprintln!("[PeDitXCDN] Found stale proxy DNS, restoring DHCP...");
                         api::log_to_file("STALE DNS found at startup, restoring DHCP");
                         let _ = dns::restore_system_dns();
@@ -349,8 +515,11 @@ pub fn run() {
             get_user_info,
             get_plans,
             claim_ip,
+            set_auto_register,
             connect,
             disconnect,
+            proxy_status,
+            emergency_stop,
             get_dns_status,
             check_relay_connection,
             resolve_relay_ip,

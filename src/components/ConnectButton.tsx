@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store";
+import { IcPower } from "./icons";
 
 export function ConnectButton() {
   const {
@@ -69,20 +70,19 @@ export function ConnectButton() {
             className={`connect-btn ${stateClass}`}>
       {/* Pulse animation when connected */}
       {connectionStatus === "connected" && (
-        <div className="absolute inset-0 rounded-2xl glow-success" />
+        <div className="absolute inset-0 rounded glow-success" />
       )}
 
-      <div className="relative z-10">
-        {/* Icon */}
-        <div className="text-3xl mb-2">
-          {loading ? "⏳" : connectionStatus === "connected" ? "🟢" : "⚡"}
-        </div>
+      <div className="relative z-10 flex flex-col items-center gap-1.5">
+        <span className="opacity-90">
+          <IcPower size={26} />
+        </span>
 
         {/* Main Label */}
         <div className="text-lg font-bold">{label}</div>
 
         {/* Sub Label */}
-        <div className="text-xs mt-1 opacity-70">{sublabel}</div>
+        <div className="text-xs mt-0.5 opacity-70">{sublabel}</div>
       </div>
     </button>
   );

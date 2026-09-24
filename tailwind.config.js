@@ -5,17 +5,22 @@ export default {
     extend: {
       colors: {
         brand: {
-          50: "#e6fff9",
-          100: "#b3ffe9",
-          200: "#80ffd9",
-          300: "#4dffc9",
-          400: "#1affb9",
-          500: "#00d4aa",
-          600: "#00b894",
-          700: "#009980",
-          800: "#007a6a",
-          900: "#005c50",
+          50: "#eef8ff",
+          100: "#d9efff",
+          200: "#bce4ff",
+          300: "#8ed5ff",
+          400: "#59bdff",
+          500: "#21a9ff",
+          600: "#0b8ae0",
+          700: "#006ebd",
+          800: "#065b9a",
+          900: "#0b4c7e",
         },
+      },
+      // G HUB panels are ~8-10px, not Tailwind's 4px. One override covers
+      // every `rounded` in the JSX instead of a class sweep.
+      borderRadius: {
+        DEFAULT: "10px",
       },
       fontFamily: {
         sans: ["Inter", "Vazirmatn", "Segoe UI", "system-ui", "sans-serif"],
