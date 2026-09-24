@@ -254,7 +254,15 @@
     background: var(--card);
     border-color: var(--warn);
     color: var(--warn);
-    cursor: wait;
+    /* Not `wait`: while a connect is in flight this button *is* the cancel
+       control, so it must read as clickable — and as destructive on hover. */
+    cursor: pointer;
+  }
+
+  .connect-btn.connecting:hover {
+    border-color: var(--danger);
+    color: var(--danger);
+    box-shadow: 0 0 44px rgba(255, 71, 87, 0.28);
   }
 
   /* Sweep bar: one pass every 1.1s across the button while connecting. */

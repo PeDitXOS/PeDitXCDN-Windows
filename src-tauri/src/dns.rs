@@ -3,6 +3,7 @@ use crate::wireproxy;
 use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::watch;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -34,6 +35,28 @@ struct ProxyState {
     fragment: bool,
 }
 
+/// Bumped by every Disconnect / emergency cut. `start_proxy` snapshots it on
+/// entry and re-checks at each phase boundary, so a connect the user started
+/// by mistake unwinds — and puts DNS back — instead of finishing behind a UI
+/// that already says «قطع». A generation, not a bool: the next press takes a
+/// fresh snapshot, so cancelling one start can never cancel the one after it.
+static CANCEL_GEN: AtomicU64 = AtomicU64::new(0);
+
+fn bump_cancel() {
+    CANCEL_GEN.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Err only when this particular press was abandoned. The webview drops the
+/// message (its own generation guard has already moved on), so it only has to
+/// be recognizable in `debug.log`.
+fn cancelled(gen: u64) -> Result<(), String> {
+    if CANCEL_GEN.load(Ordering::SeqCst) == gen {
+        Ok(())
+    } else {
+        Err("اتصال توسط کاربر لغو شد".into())
+    }
+}
+
 // ─── System DNS helpers (netsh) ───────────────────────────────────────
 
 /// Spawn a console child without flashing a CMD window.
@@ -51,16 +74,28 @@ pub(crate) fn cmd(program: &str) -> Command {
     c
 }
 
+/// Run a child and file a `SLOW` line when it took over 400 ms. Connect is a
+/// chain of these (`show interfaces` + one `set dns` per interface, twice),
+/// so a single netsh that stalls is invisible in the log — and it is the only
+/// thing that can turn a press into minutes. eprintln never reaches the log
+/// (GUI child, CREATE_NO_WINDOW), hence `log_to_file`.
+pub(crate) fn run(program: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+    let t = std::time::Instant::now();
+    let out = cmd(program).args(args).output();
+    let ms = t.elapsed().as_millis();
+    if ms > 400 {
+        let _ = crate::api::log_to_file(&format!("SLOW {ms}ms {program} {}", args.join(" ")));
+    }
+    out
+}
+
 /// Every connected non-loopback interface name, most likely first.
 /// More than one because the state column is localized and the guessed
 /// name may simply not exist — trying them in turn beats guessing once.
 #[cfg(target_os = "windows")]
 fn interface_candidates() -> Vec<String> {
     let mut found = Vec::new();
-    if let Ok(output) = cmd("netsh")
-        .args(["interface", "ip", "show", "interfaces"])
-        .output()
-    {
+    if let Ok(output) = run("netsh", &["interface", "ip", "show", "interfaces"]) {
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             // Idx Met MTU State Name — Idx must be numeric or this is the
@@ -131,14 +166,22 @@ fn netsh_out(out: &std::process::Output) -> String {
 /// Windows asks all of them at once (Smart Multi-Homed Name Resolution) —
 /// the ISP answers in ~10 ms, our relay path in ~240 ms, so the ISP's
 /// blocked answer always won the race. At least one must accept.
+///
+/// `cancel` is the caller's `CANCEL_GEN` snapshot: this loop is the slow half
+/// of a connect, so it must be able to give up between interfaces instead of
+/// running to the end after the user pressed Cancel. The restore path passes
+/// `None` — DNS is going back to DHCP and must not be abandoned halfway.
 #[cfg(target_os = "windows")]
-fn netsh_set_dns(args: &[&str], what: &str) -> Result<(), String> {
+fn netsh_set_dns(args: &[&str], what: &str, cancel: Option<u64>) -> Result<(), String> {
     let mut errs = Vec::new();
     let mut ok = 0;
     for iface in interface_candidates() {
+        if let Some(g) = cancel {
+            cancelled(g)?;
+        }
         let mut full = vec!["interface", "ip", "set", "dns", iface.as_str()];
         full.extend_from_slice(args);
-        let out = match cmd("netsh").args(&full).output() {
+        let out = match run("netsh", &full) {
             Ok(o) => o,
             Err(e) => return Err(format!("failed to run netsh: {e}")),
         };
@@ -159,7 +202,7 @@ fn netsh_set_dns(args: &[&str], what: &str) -> Result<(), String> {
 /// flush the pre-connect (ISP) result keeps being served after we repoint DNS.
 #[cfg(target_os = "windows")]
 fn flush_dns_cache() {
-    let _ = cmd("ipconfig").args(["/flushdns"]).output();
+    let _ = run("ipconfig", &["/flushdns"]);
 }
 
 /// The IPv6 resolvers on the same interface are a second path straight
@@ -167,17 +210,17 @@ fn flush_dns_cache() {
 /// Non-fatal: a failed set just leaves IPv6 unproxied, which the AAAA probe
 /// then shows as «مستقیم».
 #[cfg(target_os = "windows")]
-fn set_ipv6_dns(addr: &str) {
+fn set_ipv6_dns(addr: &str, gen: u64) -> Result<(), String> {
     for iface in interface_candidates() {
-        match cmd("netsh")
-            .args(["interface", "ipv6", "set", "dns", &iface, "static", addr, "primary"])
-            .output()
-        {
+        cancelled(gen)?;
+        let args = ["interface", "ipv6", "set", "dns", iface.as_str(), "static", addr, "primary"];
+        match run("netsh", &args) {
             Ok(o) if o.status.success() => {}
             Ok(o) => eprintln!("[PeDitXCDN] ipv6 set dns {iface}: {}", netsh_out(&o)),
             Err(e) => eprintln!("[PeDitXCDN] ipv6 set dns {iface}: {e}"),
         }
     }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -192,7 +235,7 @@ fn restore_ipv6_dns() {
         ];
         let mut done = false;
         for args in attempts {
-            if let Ok(o) = cmd("netsh").args(&args).output() {
+            if let Ok(o) = run("netsh", &args) {
                 if o.status.success() {
                     done = true;
                     break;
@@ -210,26 +253,34 @@ fn restore_ipv6_dns() {
 /// send the IPv6 resolvers there. When it is not, leaving the ISP's IPv6 DNS
 /// alone beats pointing it at a dead address (total breakage instead of a leak).
 #[cfg(target_os = "windows")]
-fn set_system_dns(dns_ip: &str, proxy_v6: bool) -> Result<(), String> {
-    netsh_set_dns(&["static", dns_ip], "set dns")?;
+fn set_system_dns(dns_ip: &str, proxy_v6: bool, gen: u64) -> Result<(), String> {
+    netsh_set_dns(&["static", dns_ip], "set dns", Some(gen))?;
     if proxy_v6 {
-        set_ipv6_dns("::1");
+        set_ipv6_dns("::1", gen)?;
     } else {
-        eprintln!("[PeDitXCDN] [::1]:53 not bound — ISP IPv6 DNS left in place (leak possible)");
+        // Not "leave IPv6 alone" any more: the connect path no longer restores
+        // DHCP before repointing, so a stale ::1 from a killed session would
+        // otherwise survive this start and black-hole resolution. Going back
+        // to dhcp removes the dead address without pointing at one.
+        restore_ipv6_dns();
+        eprintln!("[PeDitXCDN] [::1]:53 not bound — IPv6 DNS returned to dhcp (no leak, no dead ::1)");
     }
+    // Both stacks are repointed now: an abandoned press unwinds here, before
+    // the cache flush, and the caller's error path puts DHCP back.
+    cancelled(gen)?;
     flush_dns_cache();
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
-fn set_system_dns(_dns_ip: &str, _proxy_v6: bool) -> Result<(), String> {
+fn set_system_dns(_dns_ip: &str, _proxy_v6: bool, _gen: u64) -> Result<(), String> {
     Ok(())
 }
 
 /// Restore system DNS to DHCP (automatic).
 #[cfg(target_os = "windows")]
 pub fn restore_system_dns() -> Result<(), String> {
-    let r = netsh_set_dns(&["dhcp"], "restore dns");
+    let r = netsh_set_dns(&["dhcp"], "restore dns", None);
     restore_ipv6_dns();
     flush_dns_cache();
     r
@@ -696,8 +747,15 @@ fn spawn_wire_loop(lst: TcpListener, up: SocketAddr, fragment: bool, mut stop: w
 /// Binds UDP+TCP on 127.0.0.1:53 and [::1]:53, forwards to relay_ip:53,
 /// then changes system DNS to 127.0.0.1 / ::1.
 async fn start_proxy(relay_ip: String) -> Result<(), String> {
-    // Stop any existing proxy first
-    stop_proxy_inner().await;
+    let t0 = std::time::Instant::now();
+    // Snapshot of "who pressed Cancel": every later Disconnect bumps it, so a
+    // press abandoned mid-flight is recognised by every check below — and the
+    // *next* connect takes a fresh snapshot and is unaffected.
+    let gen = CANCEL_GEN.load(Ordering::SeqCst);
+    // Stop any existing proxy first — *without* the DHCP round trip: we are
+    // about to repoint DNS here anyway, and that loop is pure cost on a press.
+    stop_proxy_inner(false).await;
+    let t_stop = t0.elapsed();
 
     let relay_addr: SocketAddr = format!("{}:53", relay_ip)
         .parse()
@@ -716,8 +774,8 @@ async fn start_proxy(relay_ip: String) -> Result<(), String> {
         .map_err(|e| bind_error("TCP", e))?;
 
     // Second stack for the interface's IPv6 resolvers. A failure here is
-    // survivable: set_system_dns then leaves the ISP's IPv6 DNS alone rather
-    // than pointing it at a dead ::1.
+    // survivable: set_system_dns then puts IPv6 back on dhcp rather than
+    // pointing it at a dead ::1.
     let udp6 = UdpSocket::bind("[::1]:53").await.ok();
     let tcp6 = TcpListener::bind("[::1]:53").await.ok();
 
@@ -742,13 +800,44 @@ async fn start_proxy(relay_ip: String) -> Result<(), String> {
         _ => None,
     };
 
+    let t_bind = t0.elapsed();
+
     // Change system DNS to localhost — off the runtime thread: the netsh
     // loop is several blocking spawns (~0.5s each) and awaiting it inline
     // starved the runtime that also drives the window.
     let proxy_v6 = udp6.is_some() && tcp6.is_some();
-    tokio::task::spawn_blocking(move || set_system_dns("127.0.0.1", proxy_v6))
+    // Nothing has been pointed at us yet, so an abandoned press can just drop
+    // the sockets it bound — no restore to pay for.
+    cancelled(gen)?;
+    let repointed = tokio::task::spawn_blocking(move || set_system_dns("127.0.0.1", proxy_v6, gen))
         .await
-        .map_err(|e| e.to_string())??;
+        .map_err(|e| e.to_string())?;
+    if let Err(e) = repointed {
+        // The pre-bind restore this replaced was the only thing standing
+        // between a failed repoint and a system left on a dead 127.0.0.1.
+        // A cancel found inside the netsh loop lands here too.
+        let _ = tokio::task::spawn_blocking(restore_system_dns).await;
+        return Err(e);
+    }
+    let t_dns = t0.elapsed();
+
+    // Where a slow press actually spent its time. The SLOW lines above name
+    // the individual netsh; this one says which phase to look at first.
+    crate::api::log_to_file(&format!(
+        "CONNECT stop={}ms bind={}ms dns={}ms v6={}",
+        t_stop.as_millis(),
+        t_bind.saturating_sub(t_stop).as_millis(),
+        t_dns.saturating_sub(t_bind).as_millis(),
+        proxy_v6,
+    ));
+
+    // Last chance to abandon the press: everything below publishes the proxy
+    // as live, and DNS already points at it — so this is the one check that
+    // has to undo the repoint itself.
+    if let Err(e) = cancelled(gen) {
+        let _ = tokio::task::spawn_blocking(restore_system_dns).await;
+        return Err(e);
+    }
 
     eprintln!(
         "[PeDitXCDN] DNS proxy started: 127.0.0.1:53{} -> {}:53 (fragment: {})",
@@ -790,8 +879,17 @@ async fn start_proxy(relay_ip: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Stop the proxy and restore system DNS.
-async fn stop_proxy_inner() {
+/// Stop the proxy, and restore system DNS only when the caller asked for it.
+///
+/// `restore_dns` splits the two callers that used to share one behaviour:
+/// Disconnect/emergency want DHCP back, while **start** is about to point DNS
+/// at this very proxy again — so it used to pay a full multi-interface netsh
+/// loop (candidates + one `set dns` per interface + ipv6 + flushdns, twice
+/// counting the repoint that follows) on every single press. On a box where a
+/// netsh call takes seconds that chain is what made Connect take minutes.
+/// The safety net the pre-restore used to give is now in `start_proxy`, which
+/// restores if the repoint itself fails.
+async fn stop_proxy_inner(restore_dns: bool) {
     // Send shutdown signal (sync — watch::Sender::send needs no await)
     let tx = SHUTDOWN.lock().unwrap().take();
     let had_proxy = tx.is_some();
@@ -803,17 +901,14 @@ async fn stop_proxy_inner() {
         // Wait briefly for tasks to exit
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
+    if !restore_dns {
+        return;
+    }
 
-    // Restore only when there is something to restore from. This runs as the
-    // *first* step of every connect, and unconditionally it meant a full
-    // multi-interface netsh loop (v4 + v6 + flushdns, ~0.5s each) before the
-    // port was even bound — the "Connect takes forever" press. First connect
-    // of a session has no proxy and DNS already points at the ISP.
-    // A crash leftover *is* still caught: the status check below sees 127.0.0.1.
+    // Restore only when there is something to restore from.
     let need = had_proxy || dns_points_at_proxy().await;
     if need {
-        // Restore system DNS — same reason as in start_proxy: blocking netsh
-        // must not sit on an async worker.
+        // Blocking netsh must not sit on an async worker.
         let _ = tokio::task::spawn_blocking(restore_system_dns).await;
         eprintln!("[PeDitXCDN] System DNS restored to DHCP");
     }
@@ -849,6 +944,9 @@ pub async fn start_dns_proxy(relay_ip: &str) -> Result<(), String> {
 
 /// Stop the DNS proxy + restore system DNS (non-blocking, safe from any thread).
 pub fn stop_dns_proxy() {
+    // Also abandons a connect that is still mid-flight — same intent as the
+    // async form below.
+    bump_cancel();
     // Send the shutdown signal instead of just dropping the sender —
     // dropping stopped the UDP loop but left the TCP listener bound.
     if let Some(tx) = SHUTDOWN.lock().unwrap().take() {
@@ -899,6 +997,8 @@ pub fn last_relay() -> Option<String> {
 /// Blocking (~1–2 s of netsh): the command runs it on a worker thread, the
 /// tray on a detached one; neither may sit on the core thread.
 pub fn emergency_stop() -> EmergencyStop {
+    // A connect in flight must not finish behind this button either.
+    bump_cancel();
     let was_running = SHUTDOWN.lock().unwrap().take().is_some();
     *PROXY_STATE.lock().unwrap() = None;
     // Let the accept/recv loops drop their sockets before anyone rebinds :53.
@@ -939,7 +1039,10 @@ pub fn emergency_stop() -> EmergencyStop {
 
 /// Stop the DNS proxy + restore system DNS (async version for non-tokio threads).
 pub async fn stop_dns_proxy_async() {
-    stop_proxy_inner().await;
+    // Disconnect is also the Cancel of an in-flight connect: the running
+    // `start_proxy` sees the bump at its next phase boundary and unwinds.
+    bump_cancel();
+    stop_proxy_inner(true).await;
 }
 
 /// Get current DNS configuration status.
@@ -967,9 +1070,7 @@ pub fn get_dns_status() -> Result<DnsStatus, String> {
     #[cfg(target_os = "windows")]
     {
         let iface = get_active_interface()?;
-        let output = cmd("netsh")
-            .args(["interface", "ip", "show", "dns", &iface])
-            .output()
+        let output = run("netsh", &["interface", "ip", "show", "dns", iface.as_str()])
             .map_err(|e| format!("failed to run netsh: {e}"))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -987,9 +1088,7 @@ pub fn get_dns_status() -> Result<DnsStatus, String> {
         // v0.3.15 also repoints the IPv6 resolvers at ::1 — a leftover ::1
         // after a kill is exactly as fatal as a leftover 127.0.0.1, and
         // Windows will happily keep racing it (SMHNR).
-        let v6 = cmd("netsh")
-            .args(["interface", "ipv6", "show", "dns", &iface])
-            .output()
+        let v6 = run("netsh", &["interface", "ipv6", "show", "dns", iface.as_str()])
             .ok()
             .map(|o| netsh_dns_ips(&String::from_utf8_lossy(&o.stdout)))
             .unwrap_or_default();
@@ -1085,6 +1184,7 @@ pub fn get_net_speed() -> Result<(u64, u64), String> {
 /// address (ACL key), never the relay's.
 pub fn resolve_relay_ip(panel_url: &str) -> Result<String, String> {
     use std::net::ToSocketAddrs;
+    let t0 = std::time::Instant::now();
     let host = reqwest::Url::parse(panel_url)
         .map_err(|e| format!("invalid panel URL: {e}"))?
         .host_str()
@@ -1105,6 +1205,16 @@ pub fn resolve_relay_ip(panel_url: &str) -> Result<String, String> {
             std::net::IpAddr::V6(_) => None,
         })
         .collect();
+    // No timeout around getaddrinfo: a system resolver that is slow or dead
+    // stalls this sync command (and the window with it) for as long as
+    // Windows feels like. Say so in the log instead of guessing later.
+    let ms = t0.elapsed().as_millis();
+    if ms > 400 {
+        let _ = crate::api::log_to_file(&format!(
+            "SLOW {ms}ms resolve {host} -> {} addrs",
+            local.len()
+        ));
+    }
     for v4 in &local {
         if !wireproxy::is_loopback_v4(v4.octets()) {
             return Ok(v4.to_string());

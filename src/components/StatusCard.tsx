@@ -42,8 +42,10 @@ export function StatusCard() {
 
   // Resolve through 127.0.0.1:53 itself — the one thing that proves the
   // proxy answers instead of just a status label saying "connected".
-  // A = the record the relay hijacks; a live AAAA would let the browser
-  // leave the tunnel over IPv6, so both are shown separately.
+  // gemini.google.com is *not* one of the relay's hijacked names, so a green
+  // row means "our resolver answered", not "the answer equals the relay" —
+  // that is the property worth testing. A live AAAA would let the browser
+  // leave the tunnel over IPv6, so it is shown separately.
   useEffect(() => {
     if (connectionStatus !== "connected") return;
     let alive = true;
@@ -52,7 +54,7 @@ export function StatusCard() {
         const r = await invoke<{ a: string[]; aaaa: string[]; ms: number }>(
           // relayIp lets the backend split "our proxy is down" from "the
           // network eats port 53" — otherwise both read as a bare timeout.
-          "resolve_local", { domain: "youtube.com", relayIp },
+          "resolve_local", { domain: "gemini.google.com", relayIp },
         );
         if (!alive) return;
         setProbe({
@@ -170,16 +172,21 @@ export function StatusCard() {
         <div className="space-y-1 pt-1">
           <div className="row">
             <span className="k">تست DNS محلی (A)</span>
+            {/* Green as long as *our* resolver answered — resolve_local only
+                returns Ok when 127.0.0.1:53 itself did (it reports the dead
+                hop instead of quietly falling back). Yellow here used to mean
+                "the answer is not the relay IP", which is normal for a name
+                the relay does not hijack. */}
             <span className="v font-mono" style={{
               color: !probe ? "var(--muted)"
                 : probe.kind === "err" ? "var(--danger)"
-                : probe.viaRelay ? "var(--success)" : "var(--warn)",
+                : "var(--success)",
             }}>
               {!probe
                 ? "در حال بررسی..."
                 : probe.kind === "err"
                 ? probe.text
-                : `youtube.com → ${probe.a}${probe.viaRelay ? "  ✓ از رله" : "  ⚠ مستقیم"} (${probe.ms}ms)`}
+                : `gemini.google.com → ${probe.a}${probe.viaRelay ? "  ✓ از رله" : "  ✓ محلی"} (${probe.ms}ms)`}
             </span>
           </div>
           {probe?.kind === "ok" && (

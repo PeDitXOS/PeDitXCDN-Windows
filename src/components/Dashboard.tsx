@@ -314,7 +314,8 @@ export function Dashboard() {
       <header className="flex items-center justify-between gap-2 px-4 py-3 shrink-0"
               style={{ borderBottom: "1px solid var(--border)" }}>
         <div className="flex items-center gap-3 min-w-0">
-          <div className="w-8 h-8 rounded overflow-hidden shrink-0">
+          <div className="w-8 h-8 rounded-full overflow-hidden shrink-0"
+               style={{ boxShadow: "0 0 0 1px rgba(33,169,255,0.35)" }}>
             <img src="/logo.png" alt="PeDitXCDN" className="w-full h-full object-cover" />
           </div>
           <div className="min-w-0">
@@ -548,7 +549,7 @@ export function Dashboard() {
         <span className="text-[10px]" style={{
                 color: "var(--muted)", fontFamily: "var(--mono)", letterSpacing: "0.12em",
               }}>
-          PeDitX© v0.3.20
+          PeDitX© v0.3.22
         </span>
       </div>
     </div>
