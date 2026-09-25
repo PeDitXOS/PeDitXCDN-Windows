@@ -1,6 +1,6 @@
 [package]
 name = "peditx-cdn-client"
-version = "0.3.22"
+version = "0.3.23"
 edition = "2021"
 description = "PeDitXCDN Windows DNS Client"
 authors = ["PeDitXOS"]

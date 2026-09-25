@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../store";
 import { IcPower } from "./icons";
@@ -9,6 +9,13 @@ export function ConnectButton() {
     setDnsStatus, setError,
   } = useAppStore();
   const loading = connectionStatus === "connecting";
+  // The cancel's `disconnect` keeps running after the button already reads
+  // «اتصال»: it puts DHCP back over a second or more of netsh. A connect
+  // started inside that window gets its own repoint undone by the restore
+  // that belongs to the *previous* press — the system ends up on the ISP's
+  // resolver with a proxy running, i.e. "cancel, then connect" looks broken
+  // for good. So the button only becomes Connect once the stop has finished.
+  const [stopping, setStopping] = useState(false);
   // Which press owns the in-flight `connect`. A later press (cancel, or a
   // reconnect) bumps it, so the promise that was already out there writes
   // nothing — otherwise a cancelled connect would flip the UI back to
@@ -25,15 +32,24 @@ export function ConnectButton() {
     if (loading) {
       setConnectionStatus("disconnected");
       setError(null);
+      setStopping(true);
+      // Fail open: netsh can wedge, and a Connect button that never comes
+      // back is worse than one that comes back a moment early.
+      const bail = window.setTimeout(() => setStopping(false), 15_000);
       try {
         await invoke("disconnect");
         const dns = await invoke<{ configured: boolean; current_dns?: string }>("get_dns_status");
         if (my === gen.current) setDnsStatus(dns as never);
       } catch (e) {
         setError(String(e));
+      } finally {
+        window.clearTimeout(bail);
+        if (my === gen.current) setStopping(false);
       }
       return;
     }
+
+    if (stopping) return;
 
     if (connectionStatus === "connected") {
       try {
@@ -71,7 +87,7 @@ export function ConnectButton() {
     }
   };
 
-  const stateClass = loading
+  const stateClass = loading || stopping
     ? "connecting"
     : connectionStatus === "connected"
     ? "connected"
@@ -81,22 +97,26 @@ export function ConnectButton() {
 
   const label = loading
     ? "لغو اتصال"
+    : stopping
+    ? "در حال لغو…"
     : connectionStatus === "connected"
     ? "قطع اتصال"
     : "اتصال";
 
   const sublabel = loading
     ? "در حال اتصال… — کلیک برای لغو"
+    : stopping
+    ? "DNS به حالت عادی برمی‌گردد"
     : connectionStatus === "connected"
     ? "DNS فعال است"
     : relayIp
     ? `هدف: ${relayIp}`
     : "آماده اتصال";
 
-  // Enabled while connecting — that is the cancel control; otherwise it only
-  // needs a relay to connect to.
+  // Enabled while connecting — that is the cancel control. Disabled while
+  // the stop unwinds (see `stopping`), and otherwise it only needs a relay.
   return (
-    <button onClick={toggle} disabled={!loading && !relayIp}
+    <button onClick={toggle} disabled={!loading && (stopping || !relayIp)}
             className={`connect-btn ${stateClass}`}>
       {/* Pulse animation when connected */}
       {connectionStatus === "connected" && (

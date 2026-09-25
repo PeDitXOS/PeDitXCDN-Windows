@@ -743,6 +743,48 @@ fn spawn_wire_loop(lst: TcpListener, up: SocketAddr, fragment: bool, mut stop: w
     });
 }
 
+/// Take 127.0.0.1:53 (UDP + TCP), retrying a transient AddrInUse for ~3 s.
+///
+/// A cancelled press unwinds on its own task, and between the bump and its
+/// sockets being dropped sits a netsh loop undoing the repoint. Pressing
+/// Connect inside that window used to fail outright with «پورت 53 اشغال
+/// است» — a condition that lasts about a second, reported as if it were
+/// permanent, which is what made a cancel look like it broke Connect for
+/// good. `port_holder` (netstat + tasklist, ~0.5 s) only runs on the last
+/// try; every earlier one is just another 100 ms.
+async fn bind53() -> Result<(UdpSocket, TcpListener), String> {
+    const ATTEMPTS: u32 = 30;
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let give_up = attempt + 1 == ATTEMPTS;
+
+        let udp = match UdpSocket::bind("127.0.0.1:53").await {
+            Ok(s) => s,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::AddrInUse && !give_up {
+                    continue;
+                }
+                return Err(bind_error("UDP", e));
+            }
+        };
+        match TcpListener::bind("127.0.0.1:53").await {
+            Ok(tcp) => return Ok((udp, tcp)),
+            Err(e) => {
+                let transient = e.kind() == std::io::ErrorKind::AddrInUse;
+                drop(udp);
+                if transient && !give_up {
+                    continue;
+                }
+                return Err(bind_error("TCP", e));
+            }
+        }
+    }
+    // Unreachable — the final attempt always returns from inside the loop.
+    Err(bind_error("UDP", std::io::Error::from(std::io::ErrorKind::AddrInUse)))
+}
+
 /// Start the DNS proxy as a background tokio task.
 /// Binds UDP+TCP on 127.0.0.1:53 and [::1]:53, forwards to relay_ip:53,
 /// then changes system DNS to 127.0.0.1 / ::1.
@@ -766,12 +808,7 @@ async fn start_proxy(relay_ip: String) -> Result<(), String> {
     // Loopback only: system DNS points at 127.0.0.1, so we never need
     // 0.0.0.0 — which both collides with ICS/Docker binds on other local
     // addresses and exposes an open resolver to the whole LAN.
-    let udp = UdpSocket::bind("127.0.0.1:53")
-        .await
-        .map_err(|e| bind_error("UDP", e))?;
-    let tcp = TcpListener::bind("127.0.0.1:53")
-        .await
-        .map_err(|e| bind_error("TCP", e))?;
+    let (udp, tcp) = bind53().await?;
 
     // Second stack for the interface's IPv6 resolvers. A failure here is
     // survivable: set_system_dns then puts IPv6 back on dhcp rather than
@@ -808,7 +845,10 @@ async fn start_proxy(relay_ip: String) -> Result<(), String> {
     let proxy_v6 = udp6.is_some() && tcp6.is_some();
     // Nothing has been pointed at us yet, so an abandoned press can just drop
     // the sockets it bound — no restore to pay for.
-    cancelled(gen)?;
+    if let Err(e) = cancelled(gen) {
+        crate::api::log_to_file(&format!("CONNECT ABORT before repoint: {e}"));
+        return Err(e);
+    }
     let repointed = tokio::task::spawn_blocking(move || set_system_dns("127.0.0.1", proxy_v6, gen))
         .await
         .map_err(|e| e.to_string())?;
@@ -816,7 +856,11 @@ async fn start_proxy(relay_ip: String) -> Result<(), String> {
         // The pre-bind restore this replaced was the only thing standing
         // between a failed repoint and a system left on a dead 127.0.0.1.
         // A cancel found inside the netsh loop lands here too.
+        // Sockets out first: `restore` is seconds of netsh, and a press that
+        // arrives while we still hold :53 would bind-fail against ourselves.
+        drop((udp, tcp, udp6, tcp6, wire));
         let _ = tokio::task::spawn_blocking(restore_system_dns).await;
+        crate::api::log_to_file(&format!("CONNECT ABORT after repoint: {e}"));
         return Err(e);
     }
     let t_dns = t0.elapsed();
@@ -833,9 +877,12 @@ async fn start_proxy(relay_ip: String) -> Result<(), String> {
 
     // Last chance to abandon the press: everything below publishes the proxy
     // as live, and DNS already points at it — so this is the one check that
-    // has to undo the repoint itself.
+    // has to undo the repoint itself. Sockets before the restore, same as
+    // above: dropping them costs nothing, holding them costs the next press.
     if let Err(e) = cancelled(gen) {
+        drop((udp, tcp, udp6, tcp6, wire));
         let _ = tokio::task::spawn_blocking(restore_system_dns).await;
+        crate::api::log_to_file(&format!("CONNECT ABORT before publish: {e}"));
         return Err(e);
     }
 
