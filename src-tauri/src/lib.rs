@@ -1,6 +1,8 @@
 mod api;
 mod dns;
 mod types;
+mod singconf;
+mod tunnel;
 mod wireproxy;
 
 use std::sync::Mutex;
@@ -259,6 +261,103 @@ fn logout(state: tauri::State<'_, AppState>) -> Result<(), String> {
 }
 
 /// Bring the window back from the tray (menu item and icon click both).
+// ─── sing-box tunnel ──────────────────────────────────────────────────────
+//
+// Every one of these is async and every blocking call goes through
+// `spawn_blocking`: v0.3.16 shipped a frozen window because netsh ran on the
+// core thread, and reading a config off disk is the same mistake smaller.
+
+#[tauri::command]
+async fn tunnel_status() -> Result<tunnel::TunnelStatus, String> {
+    tokio::task::spawn_blocking(tunnel::status)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Store and validate a pasted body. Does not start anything — a config the
+/// parser rejects leaves the previous one in place.
+#[tauri::command]
+async fn tunnel_set_config(body: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || tunnel::set_config(&body))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn tunnel_add_app(path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || tunnel::add_app(path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn tunnel_remove_app(path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || tunnel::remove_app(path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn tunnel_start(relay_ip: String, panel_ip: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || tunnel::start(relay_ip, panel_ip))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn tunnel_stop() -> Result<(), String> {
+    tokio::task::spawn_blocking(|| tunnel::stop("user"))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Live proof of what is tunneled, straight from clash_api.
+#[tauri::command]
+async fn tunnel_connections() -> Result<Vec<tunnel::TunnelConn>, String> {
+    tunnel::connections().await
+}
+
+/// The settings the page shows, from disk if this is the first read.
+#[tauri::command]
+async fn tunnel_opts_get() -> Result<singconf::Opts, String> {
+    tokio::task::spawn_blocking(tunnel::opts)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Save, regenerate, and restart a running tunnel so the change is real.
+#[tauri::command]
+async fn tunnel_opts_set(opts: singconf::Opts) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || tunnel::set_opts(opts))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The config sing-box would be handed right now — what was written, not
+/// what the UI thinks was written.
+#[tauri::command]
+async fn tunnel_preview() -> Result<String, String> {
+    tokio::task::spawn_blocking(tunnel::preview)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Send one ticked app to one named config. Empty tag = back to the default.
+#[tauri::command]
+async fn tunnel_set_route(path: String, tag: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || tunnel::set_route(path, tag))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The switch beside a config in the list.
+#[tauri::command]
+async fn tunnel_set_cfg(tag: String, on: bool) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || tunnel::set_cfg(tag, on))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 fn show_main(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
@@ -529,6 +628,18 @@ pub fn run() {
             resolve_local,
             get_net_speed,
             logout,
+            tunnel_status,
+            tunnel_set_config,
+            tunnel_add_app,
+            tunnel_remove_app,
+            tunnel_start,
+            tunnel_stop,
+            tunnel_connections,
+            tunnel_opts_get,
+            tunnel_opts_set,
+            tunnel_preview,
+            tunnel_set_route,
+            tunnel_set_cfg,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

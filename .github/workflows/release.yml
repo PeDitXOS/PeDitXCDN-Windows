@@ -38,6 +38,29 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+
+      # sing-box sidecar: bundled next to PeDitXCDN.exe so tunnel::binary_path()
+      # finds it. Pinned by SHA256 — an unpinned download is a supply-chain hole
+      # on a binary that sees every packet of the games it routes.
+      - name: Fetch sing-box sidecar
+        shell: pwsh
+        env:
+          SING_BOX_VERSION: '1.14.2'
+          SING_BOX_ZIP_SHA256: 'c2d8bfff918755808781dfdeeb8581b6c91eb3a243d9a7b55483cfc0c0684d32'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $v = $env:SING_BOX_VERSION
+          $url = "https://github.com/SagerNet/sing-box/releases/download/v$v/sing-box-$v-windows-amd64.zip"
+          $zip = "$env:RUNNER_TEMP\sing-box.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $hash = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:SING_BOX_ZIP_SHA256) { throw "sing-box zip SHA256 mismatch: $hash" }
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\singbox" -Force
+          $dir = Get-ChildItem "$env:RUNNER_TEMP\singbox" -Directory | Select-Object -First 1
+          Copy-Item "$($dir.FullName)\sing-box.exe" src-tauri\sing-box.exe -Force
+          Copy-Item "$($dir.FullName)\libcronet.dll" src-tauri\libcronet.dll -Force
+          Write-Host "sing-box $v ready (verified $hash)"
+
       - name: Build frontend
         run: npm run build
 

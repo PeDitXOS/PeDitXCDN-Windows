@@ -6,15 +6,20 @@ import { ConnectButton } from "./ConnectButton";
 import { StatusCard } from "./StatusCard";
 import { QuotaBar } from "./QuotaBar";
 import { PlansList } from "./PlansList";
+import { TunnelCard } from "./TunnelCard";
+import { TunnelSettings } from "./TunnelSettings";
+import { TunnelSwitch } from "./TunnelSwitch";
 import {
   IcPower, IcUser, IcActivity, IcLayers,
-  IcCalendar, IcGauge, IcDisk, IcRefresh, IcAlert, IcCard, IcChat, IcLogout,
+  IcCalendar, IcGauge, IcDisk, IcRefresh, IcAlert, IcCard, IcChat, IcLogout, IcShield,
 } from "./icons";
 
 const PANEL_URL_FALLBACK = "https://docproir.peditxcdn.ir:8443";
 const BOT_USERNAME = "peditxcdn_bot";
 
-/** Rail sections, top to bottom — ids match the scroll targets below. */
+/** Rail sections, top to bottom — ids match the scroll targets below.
+ *  sing-box is not among them: it has its own page (see `view` below), so
+ *  the main scroll stays the DNS product the app is actually for. */
 const SECTIONS = [
   { id: "sec-connect", title: "اتصال", icon: <IcPower size={18} /> },
   { id: "sec-account", title: "حساب", icon: <IcUser size={18} /> },
@@ -290,8 +295,25 @@ export function Dashboard() {
   };
 
   // Left rail follows the scroll position; clicking scrolls to that section.
+  // `view` swaps the whole content for the sing-box page — the tunnel is a
+  // side path, so it does not get to sit in this scroll at all.
   const [activeSec, setActiveSec] = useState(SECTIONS[0].id);
+  const [view, setView] = useState<"dash" | "tunnel">("dash");
+  const scroller = useRef<HTMLDivElement>(null);
+  const jumpRef = useRef<string | null>(null);
+
+  // A rail click made while on the tunnel page: the section does not exist
+  // until this render is committed, so the scroll has to wait for it.
+  useEffect(() => {
+    if (view !== "dash") return;
+    const id = jumpRef.current;
+    if (!id) return;
+    jumpRef.current = null;
+    document.getElementById(id)?.scrollIntoView({ block: "start" });
+  }, [view]);
+
   const onScroll = (e: UIEvent<HTMLDivElement>) => {
+    if (view !== "dash") return;
     // Anchor just under the card's own top edge — same line every section
     // header passes on its way up.
     const limit = e.currentTarget.getBoundingClientRect().top + 140;
@@ -304,7 +326,16 @@ export function Dashboard() {
   };
   const goSection = (id: string) => {
     setActiveSec(id);
+    if (view !== "dash") {
+      jumpRef.current = id;
+      setView("dash");
+      return;
+    }
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+  const openTunnel = () => {
+    setView("tunnel");
+    scroller.current?.scrollTo({ top: 0 });
   };
 
   return (
@@ -374,6 +405,18 @@ export function Dashboard() {
               {s.icon}
             </button>
           ))}
+          {/* sing-box: its own page, reached from the rail */}
+          <button
+            type="button"
+            title="تونل بازی"
+            aria-label="تونل بازی"
+            aria-current={view === "tunnel" ? "true" : undefined}
+            className={`rail-item ${view === "tunnel" ? "active" : ""}`}
+            onClick={openTunnel}
+          >
+            <IcShield size={18} />
+          </button>
+
           {/* Sign-out lives at the foot of the rail: a labelled button in the
               header is what forced the brand block down to 30px at 420px. */}
           <button
@@ -388,7 +431,29 @@ export function Dashboard() {
         </nav>
 
         {/* Scrollable Content */}
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4" onScroll={onScroll}>
+        <div ref={scroller} className="flex-1 overflow-y-auto px-5 py-4 space-y-4" onScroll={onScroll}>
+
+        {view === "tunnel" ? (
+          <div className="space-y-4 max-w-xl mx-auto">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="rail-item"
+                title="بازگشت"
+                aria-label="بازگشت"
+                onClick={() => goSection(SECTIONS[0].id)}
+              >
+                <span className="text-sm" style={{ lineHeight: 1 }}>→</span>
+              </button>
+              <span className="k" style={{ color: "var(--muted)" }}>
+                صفحهٔ sing-box
+              </span>
+            </div>
+            <TunnelCard />
+            <TunnelSettings />
+          </div>
+        ) : (
+        <>
 
         {/* Connect Button - Large Center */}
         <div id="sec-connect" className="scroll-mt-2">
@@ -518,6 +583,9 @@ export function Dashboard() {
           <StatusCard />
         </div>
 
+        {/* sing-box — one switch and one icon; the rest is behind the icon */}
+        <TunnelSwitch onOpen={openTunnel} />
+
         {/* Quick Actions */}
         <div className="grid grid-cols-2 gap-3">
           <button onClick={openPanel} className="card card-hover p-3.5 text-center space-y-1">
@@ -540,6 +608,8 @@ export function Dashboard() {
         <div id="sec-plans" className="scroll-mt-2">
           <PlansList />
         </div>
+        </>
+        )}
         </div>
       </div>
 
@@ -549,7 +619,7 @@ export function Dashboard() {
         <span className="text-[10px]" style={{
                 color: "var(--muted)", fontFamily: "var(--mono)", letterSpacing: "0.12em",
               }}>
-          PeDitX© v0.3.23
+          PeDitX© v0.3.30
         </span>
       </div>
     </div>

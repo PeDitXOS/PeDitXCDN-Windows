@@ -7,3 +7,6 @@ tools/*.pfx
 tools/*.cer
 tools/*.pem
 tools/cert-base64.txt
+# sing-box sidecar, fetched by CI (see .github/workflows/*.yml)
+src-tauri/sing-box.exe
+src-tauri/libcronet.dll
