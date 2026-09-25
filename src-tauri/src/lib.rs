@@ -339,7 +339,7 @@ async fn tunnel_opts_set(opts: singconf::Opts) -> Result<(), String> {
 async fn tunnel_preview() -> Result<String, String> {
     tokio::task::spawn_blocking(tunnel::preview)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?
 }
 
 /// Send one ticked app to one named config. Empty tag = back to the default.
